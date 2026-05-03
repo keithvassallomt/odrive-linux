@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "odrive-core",
+    "odrive-cli",
+    "odrive-gui",
+]
+resolver = "2"
