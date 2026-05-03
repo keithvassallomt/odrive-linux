@@ -26,7 +26,7 @@ fn main() {
         let list = ListBox::new();
         list.add_css_class("boxed-list");
         list.set_margin_top(24);
-        list.set_margin_bottom(24);
+        list.set_margin_bottom(12);
         list.set_margin_start(24);
         list.set_margin_end(24);
 
@@ -61,14 +61,25 @@ fn main() {
         db_row.add_suffix(&scan_btn);
         list.append(&db_row);
 
-        // Mounts Group
-        let mount_row = ActionRow::builder()
-            .title("Active Mounts")
-            .subtitle("Checking mounts...")
-            .build();
-        list.append(&mount_row);
-
         content.append(&list);
+
+        // Mounts List
+        let mount_list_title = Label::builder()
+            .label("Active Mounts")
+            .xalign(0.0)
+            .margin_start(28)
+            .margin_top(12)
+            .build();
+        mount_list_title.add_css_class("heading");
+        content.append(&mount_list_title);
+
+        let mount_list = ListBox::new();
+        mount_list.add_css_class("boxed-list");
+        mount_list.set_margin_top(6);
+        mount_list.set_margin_bottom(24);
+        mount_list.set_margin_start(24);
+        mount_list.set_margin_end(24);
+        content.append(&mount_list);
 
         // Update function
         let update_ui = {
@@ -76,7 +87,7 @@ fn main() {
             let status_label = status_label.clone();
             let start_stop_btn = start_stop_btn.clone();
             let db_row = db_row.clone();
-            let mount_row = mount_row.clone();
+            let mount_list = mount_list.clone();
             move || {
                 let is_running = agent.is_running();
                 status_label.set_label(if is_running { "Running" } else { "Stopped" });
@@ -87,11 +98,31 @@ fn main() {
                     db_row.set_subtitle(&format!("{} tracked items", count));
                 }
 
+                // Refresh mount list
+                while let Some(child) = mount_list.first_child() {
+                    mount_list.remove(&child);
+                }
+
                 if let Ok(mounts) = agent.get_mounts() {
-                    let mount_count = mounts.len();
-                    mount_row.set_subtitle(&format!("{} active mounts", mount_count));
+                    if mounts.is_empty() {
+                        let empty_row = ActionRow::builder()
+                            .title("No active mounts")
+                            .build();
+                        mount_list.append(&empty_row);
+                    } else {
+                        for mount in mounts {
+                            let row = ActionRow::builder()
+                                .title(&mount.local_path)
+                                .subtitle(&format!("Remote: {} ({})", mount.remote_path, mount.status))
+                                .build();
+                            mount_list.append(&row);
+                        }
+                    }
                 } else {
-                    mount_row.set_subtitle("Agent not running");
+                    let error_row = ActionRow::builder()
+                        .title("Unable to retrieve mounts")
+                        .build();
+                    mount_list.append(&error_row);
                 }
             }
         };

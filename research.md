@@ -89,3 +89,11 @@ The Rust application acts as a high-level manager/orchestrator for the `odriveag
 ### 4. Space Management
 - Implement "Right-click -> Unsync" by calling `odrive unsync "/path/to/file"`.
 - Monitor disk usage and potentially provide an "Auto-Unsync" toggle based on the CLI's `autounsyncthreshold`.
+
+## Night Shift Progress (2026-05-03)
+- **Daemon Management:** Added robust logic to start/stop `odriveagent` via systemd or fallback.
+- **SQLite State:** Implemented placeholder tracking in `~/.odrive-linux.db`.
+- **Scanner:** Added a recursive scanner that detects `.cloud` and `.cloudf` files.
+- **CLI:** Expanded with `mounts`, `refresh`, and `scan` commands.
+- **GUI:** Enhanced dashboard with live status updates, placeholder counts, and a 'Scan Now' button.
+- **Verification:** All components pass `cargo check` on the VM.
