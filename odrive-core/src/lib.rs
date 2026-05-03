@@ -7,6 +7,33 @@ use thiserror::Error;
 use std::path::Path;
 use std::fs;
 
+/// Split a line on runs of 2+ whitespace characters. This preserves single
+/// spaces inside fields (e.g. mount paths with spaces) which `split_whitespace`
+/// would shred.
+fn split_columns(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut ws_run = 0usize;
+
+    for ch in line.chars() {
+        if ch.is_whitespace() {
+            ws_run += 1;
+        } else {
+            if ws_run >= 2 && !current.is_empty() {
+                out.push(std::mem::take(&mut current));
+            } else if ws_run >= 1 && !current.is_empty() {
+                current.push(' ');
+            }
+            current.push(ch);
+            ws_run = 0;
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
 #[derive(Error, Debug)]
 pub enum OdriveError {
     #[error("CLI execution failed: {0}")]
@@ -46,16 +73,29 @@ impl OdriveAgent {
         }
     }
 
+    /// True if the odrive CLI binary itself is on disk. A `false` here means
+    /// the user hasn't installed the agent at all, which is a different
+    /// failure mode from the daemon being stopped.
+    pub fn binary_exists(&self) -> bool {
+        Path::new(&self.bin_path).exists()
+    }
+
     pub fn is_running(&self) -> bool {
-        let output = Command::new(&self.bin_path)
-            .arg("status")
-            .output();
-        
-        match output {
+        if !self.binary_exists() {
+            return false;
+        }
+        match Command::new(&self.bin_path).arg("status").output() {
             Ok(out) => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                !stdout.contains("Unable to connect")
-            },
+                // Primary signal: a successful exit. Secondary: the legacy
+                // "Unable to connect" marker, since older odrive builds
+                // returned 0 even when the daemon was unreachable.
+                let combined = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr),
+                );
+                out.status.success() && !combined.contains("Unable to connect")
+            }
             Err(_) => false,
         }
     }
@@ -110,13 +150,22 @@ impl OdriveAgent {
     }
 
     pub fn get_status(&self) -> Result<OdriveStatus, OdriveError> {
-        let output = Command::new(&self.bin_path)
-            .arg("status")
-            .output()?;
+        if !self.binary_exists() {
+            return Ok(OdriveStatus {
+                is_running: false,
+                sync_status: format!(
+                    "odrive binary not found at {}. Install it from https://www.odrive.com/downloads",
+                    self.bin_path,
+                ),
+            });
+        }
 
+        let output = Command::new(&self.bin_path).arg("status").output()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let is_running = !stdout.contains("Unable to connect");
-        
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let is_running =
+            output.status.success() && !stdout.contains("Unable to connect") && !stderr.contains("Unable to connect");
+
         Ok(OdriveStatus {
             is_running,
             sync_status: stdout.to_string(),
@@ -170,15 +219,16 @@ impl OdriveAgent {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut mounts = Vec::new();
 
-        // odrive mounts output format:
-        // /home/keith/odrive  /  active
+        // `odrive mounts` separates columns with 2+ spaces, so paths containing
+        // single spaces survive intact. Lines with fewer than 3 columns (blanks,
+        // headers, footer text) are skipped.
         for line in stdout.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
+            let parts = split_columns(line);
             if parts.len() >= 3 {
                 mounts.push(OdriveMount {
-                    local_path: parts[0].to_string(),
-                    remote_path: parts[1].to_string(),
-                    status: parts[2].to_string(),
+                    local_path: parts[0].clone(),
+                    remote_path: parts[1].clone(),
+                    status: parts[2].clone(),
                 });
             }
         }
@@ -196,19 +246,33 @@ impl OdriveAgent {
         let mut count = 0;
 
         fn visit_dirs(dir: &Path, db: &OdriveDb, count: &mut usize) -> std::io::Result<()> {
-            if dir.is_dir() {
-                for entry in fs::read_dir(dir)? {
-                    let entry = entry?;
-                    let path = entry.path();
-                    let file_name = path.file_name().unwrap().to_string_lossy();
-                    
-                    if file_name.ends_with(".cloud") || file_name.ends_with(".cloudf") {
-                        let is_folder = file_name.ends_with(".cloudf");
-                        let local_path = path.to_string_lossy();
-                        db.upsert_placeholder(&local_path, is_folder, "placeholder").unwrap();
-                        *count += 1;
-                    } else if path.is_dir() {
-                        visit_dirs(&path, db, count)?;
+            if !dir.is_dir() {
+                return Ok(());
+            }
+            for entry in fs::read_dir(dir)? {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(e) => {
+                        log::warn!("scan: skipping unreadable entry in {}: {}", dir.display(), e);
+                        continue;
+                    }
+                };
+                let path = entry.path();
+                let Some(file_name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                    continue;
+                };
+
+                if file_name.ends_with(".cloud") || file_name.ends_with(".cloudf") {
+                    let is_folder = file_name.ends_with(".cloudf");
+                    let local_path = path.to_string_lossy();
+                    if let Err(e) = db.upsert_placeholder(&local_path, is_folder, "placeholder") {
+                        log::warn!("scan: failed to record placeholder {}: {}", local_path, e);
+                        continue;
+                    }
+                    *count += 1;
+                } else if path.is_dir() {
+                    if let Err(e) = visit_dirs(&path, db, count) {
+                        log::warn!("scan: failed to recurse into {}: {}", path.display(), e);
                     }
                 }
             }
