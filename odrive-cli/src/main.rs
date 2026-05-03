@@ -12,6 +12,8 @@ struct Cli {
 enum Commands {
     /// Show current odrive status
     Status,
+    /// List active mounts
+    Mounts,
     /// Start the odrive agent
     Start,
     /// Stop the odrive agent
@@ -24,6 +26,11 @@ enum Commands {
     /// Unsync a file or folder
     Unsync {
         /// Path to the file or folder
+        path: String,
+    },
+    /// Refresh a folder
+    Refresh {
+        /// Path to the folder
         path: String,
     },
     /// Scan for placeholders and update the database
@@ -54,6 +61,22 @@ fn main() {
                 Err(e) => eprintln!("Error getting status: {}", e),
             }
         }
+        Some(Commands::Mounts) => {
+            match agent.get_mounts() {
+                Ok(mounts) => {
+                    if mounts.is_empty() {
+                        println!("No active mounts found.");
+                    } else {
+                        println!("{:<40} {:<20} {:<10}", "Local Path", "Remote Path", "Status");
+                        println!("{}", "-".repeat(70));
+                        for mount in mounts {
+                            println!("{:<40} {:<20} {:<10}", mount.local_path, mount.remote_path, mount.status);
+                        }
+                    }
+                }
+                Err(e) => eprintln!("Error getting mounts: {}", e),
+            }
+        }
         Some(Commands::Start) => {
             println!("Starting agent...");
             match agent.start() {
@@ -80,6 +103,13 @@ fn main() {
             match agent.unsync(&path) {
                 Ok(out) => println!("Done: {}", out),
                 Err(e) => eprintln!("Unsync failed: {}", e),
+            }
+        }
+        Some(Commands::Refresh { path }) => {
+            println!("Refreshing {}...", path);
+            match agent.refresh(&path) {
+                Ok(out) => println!("Done: {}", out),
+                Err(e) => eprintln!("Refresh failed: {}", e),
             }
         }
         Some(Commands::Scan { path }) => {

@@ -25,6 +25,13 @@ pub struct OdriveStatus {
     pub sync_status: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OdriveMount {
+    pub local_path: String,
+    pub remote_path: String,
+    pub status: String,
+}
+
 pub struct OdriveAgent {
     bin_path: String,
     agent_path: String,
@@ -58,7 +65,6 @@ impl OdriveAgent {
             return Ok(());
         }
 
-        // Try systemd first
         let status = Command::new("systemctl")
             .arg("--user")
             .arg("start")
@@ -67,7 +73,6 @@ impl OdriveAgent {
 
         match status {
             Ok(s) if s.success() => {
-                // Wait a bit for it to spin up
                 std::thread::sleep(std::time::Duration::from_secs(2));
                 if self.is_running() {
                     return Ok(());
@@ -76,7 +81,6 @@ impl OdriveAgent {
             _ => {}
         }
 
-        // Fallback to nohup if systemd fails or isn't set up
         Command::new("nohup")
             .arg(&self.agent_path)
             .stdout(Stdio::null())
@@ -92,14 +96,12 @@ impl OdriveAgent {
     }
 
     pub fn stop(&self) -> Result<(), OdriveError> {
-        // Try systemd
         let _ = Command::new("systemctl")
             .arg("--user")
             .arg("stop")
             .arg("odrive.service")
             .status();
 
-        // Also try killing the binary directly just in case
         Command::new("pkill")
             .arg("odriveagent")
             .status()?;
@@ -147,39 +149,41 @@ impl OdriveAgent {
         }
     }
 
-    pub fn is_mounted(&self, path: &str) -> bool {
-        let output = Command::new("mount").output();
-        match output {
-            Ok(out) => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                stdout.contains(path)
-            },
-            Err(_) => false,
+    pub fn refresh(&self, path: &str) -> Result<String, OdriveError> {
+        let output = Command::new(&self.bin_path)
+            .arg("refresh")
+            .arg(path)
+            .output()?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            Err(OdriveError::CliError(String::from_utf8_lossy(&output.stderr).to_string()))
         }
     }
-    
-    pub fn setup_systemd_service(&self) -> Result<(), OdriveError> {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/keith".to_string());
-        let service_path = format!("{}/.config/systemd/user/odrive.service", home);
-        let service_dir = Path::new(&service_path).parent().unwrap();
-        
-        if !service_dir.exists() {
-            fs::create_dir_all(service_dir)?;
+
+    pub fn get_mounts(&self) -> Result<Vec<OdriveMount>, OdriveError> {
+        let output = Command::new(&self.bin_path)
+            .arg("mounts")
+            .output()?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut mounts = Vec::new();
+
+        // odrive mounts output format:
+        // /home/keith/odrive  /  active
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 3 {
+                mounts.push(OdriveMount {
+                    local_path: parts[0].to_string(),
+                    remote_path: parts[1].to_string(),
+                    status: parts[2].to_string(),
+                });
+            }
         }
 
-        let content = format!(
-            "[Unit]\n             Description=Run odrive-agent as a user service\n             Wants=network-online.target\n             After=network.target network-online.target\n\n             [Service]\n             Type=simple\n             ExecStart={}\n             Restart=on-failure\n             RestartSec=10\n\n             [Install]\n             WantedBy=default.target",
-            self.agent_path
-        );
-
-        fs::write(&service_path, content)?;
-        
-        Command::new("systemctl")
-            .arg("--user")
-            .arg("daemon-reload")
-            .status()?;
-            
-        Ok(())
+        Ok(mounts)
     }
 
     pub fn get_db_path(&self) -> String {
