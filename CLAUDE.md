@@ -40,6 +40,7 @@ These are not installed by this repo — the user must have them set up before a
 2. **Authentication** done out-of-band via `odrive authenticate <key>`.
 3. **At least one mount** created via `odrive mount <local> <remote>`. The conventional local mount is `~/odrive`.
 4. **State DB** at `~/.odrive-linux.db` — created automatically on first `scan` or GUI launch.
+5. **`python3-nautilus`** (only for the right-click integration) — Debian/Ubuntu `python3-nautilus`, Fedora `nautilus-python`, Arch `python-nautilus`. Without it the extension file is never loaded by Nautilus, even when symlinked into `~/.local/share/nautilus-python/extensions/`. Not auto-installed by anything in this repo.
 
 ## Architecture
 
