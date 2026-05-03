@@ -55,8 +55,17 @@ fn main() {
                 Ok(status) => {
                     if status.is_running {
                         println!("Agent is running!");
-                        let db = OdriveDb::open(agent.get_db_path()).unwrap();
-                        let count = db.count_placeholders().unwrap_or(0);
+                        let count = match OdriveDb::open(agent.get_db_path()) {
+                            Ok(db) => db.count_placeholders().unwrap_or(0),
+                            Err(e) => {
+                                eprintln!(
+                                    "Warning: could not open state DB at {} ({}); placeholder count unavailable.",
+                                    agent.get_db_path(),
+                                    e,
+                                );
+                                0
+                            }
+                        };
                         println!("Tracked Placeholders: {}", count);
                         println!("\nCLI Status Output:\n{}", status.sync_status);
                     } else {
@@ -122,10 +131,7 @@ fn main() {
             }
         }
         Some(Commands::Scan { path }) => {
-            let scan_path = path.unwrap_or_else(|| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/home/keith".to_string());
-                format!("{}/odrive", home)
-            });
+            let scan_path = path.unwrap_or_else(|| agent.default_mount_path());
             println!("Scanning {} for placeholders...", scan_path);
             match agent.scan_placeholders(&scan_path) {
                 Ok(count) => println!("Found and tracked {} placeholders.", count),

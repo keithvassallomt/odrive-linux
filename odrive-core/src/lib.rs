@@ -77,15 +77,27 @@ pub struct OdriveMount {
 pub struct OdriveAgent {
     bin_path: String,
     agent_path: String,
+    home: String,
 }
 
 impl OdriveAgent {
     pub fn new() -> Self {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/keith".to_string());
+        // Every path this crate touches (agent dir, state DB, default
+        // mount) is anchored to $HOME. If it isn't set the environment is
+        // broken and we'd rather fail loudly than silently pick a wrong
+        // directory.
+        let home = std::env::var("HOME").expect("HOME environment variable must be set");
         Self {
             bin_path: format!("{}/.odrive-agent/bin/odrive", home),
             agent_path: format!("{}/.odrive-agent/bin/odriveagent", home),
+            home,
         }
+    }
+
+    /// Conventional default mount path (`~/odrive`) — used by CLI/GUI as
+    /// the scan target when no explicit path is given.
+    pub fn default_mount_path(&self) -> String {
+        format!("{}/odrive", self.home)
     }
 
     /// True if the odrive CLI binary itself is on disk. A `false` here means
@@ -253,8 +265,7 @@ impl OdriveAgent {
     }
 
     pub fn get_db_path(&self) -> String {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/keith".to_string());
-        format!("{}/.odrive-linux.db", home)
+        format!("{}/.odrive-linux.db", self.home)
     }
 
     pub fn scan_placeholders(&self, mount_path: &str) -> Result<usize, OdriveError> {

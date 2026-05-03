@@ -166,8 +166,7 @@ fn main() {
             let update = update_ui.clone();
             let overlay = overlay.clone();
             move |_| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/home/keith".to_string());
-                let mount_path = format!("{}/odrive", home);
+                let mount_path = agent.default_mount_path();
                 match agent.scan_placeholders(&mount_path) {
                     Ok(count) => {
                         overlay.add_toast(Toast::new(&format!("Found {} placeholders", count)));
