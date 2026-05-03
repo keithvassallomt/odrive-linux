@@ -75,3 +75,72 @@ impl OdriveDb {
         Ok(count)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fresh_db() -> OdriveDb {
+        OdriveDb::open(":memory:").expect("open in-memory db")
+    }
+
+    #[test]
+    fn fresh_db_is_empty() {
+        let db = fresh_db();
+        assert_eq!(db.count_placeholders().unwrap(), 0);
+        assert!(db.get_all_placeholders().unwrap().is_empty());
+    }
+
+    #[test]
+    fn upsert_inserts_and_counts() {
+        let db = fresh_db();
+        db.upsert_placeholder("/a.cloud", false, "placeholder").unwrap();
+        db.upsert_placeholder("/b.cloudf", true, "placeholder").unwrap();
+        assert_eq!(db.count_placeholders().unwrap(), 2);
+    }
+
+    #[test]
+    fn upsert_is_idempotent_on_local_path() {
+        // The scanner re-upserts every entry on each scan; if this didn't
+        // dedup by local_path the count would grow without bound.
+        let db = fresh_db();
+        db.upsert_placeholder("/same.cloud", false, "placeholder").unwrap();
+        db.upsert_placeholder("/same.cloud", false, "synced").unwrap();
+        db.upsert_placeholder("/same.cloud", false, "synced").unwrap();
+        assert_eq!(db.count_placeholders().unwrap(), 1);
+    }
+
+    #[test]
+    fn upsert_updates_sync_status_only() {
+        // Documented quirk: ON CONFLICT updates sync_status but not
+        // is_folder. Pinning this so a refactor doesn't change it silently —
+        // if it ever does need to change, this test should be updated
+        // alongside.
+        let db = fresh_db();
+        db.upsert_placeholder("/x", true, "placeholder").unwrap();
+        db.upsert_placeholder("/x", false, "synced").unwrap();
+        let rows = db.get_all_placeholders().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].is_folder, "is_folder should not change on upsert");
+        assert_eq!(rows[0].sync_status, "synced");
+    }
+
+    #[test]
+    fn get_all_returns_inserted_rows() {
+        let db = fresh_db();
+        db.upsert_placeholder("/a.cloud", false, "placeholder").unwrap();
+        db.upsert_placeholder("/b.cloudf", true, "placeholder").unwrap();
+        let mut rows = db.get_all_placeholders().unwrap();
+        rows.sort_by(|a, b| a.local_path.cmp(&b.local_path));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].local_path, "/a.cloud");
+        assert!(!rows[0].is_folder);
+        assert_eq!(rows[0].sync_status, "placeholder");
+        // upsert_placeholder never writes remote_path — keep that contract
+        // visible until someone deliberately changes it.
+        assert!(rows[0].remote_path.is_none());
+        assert_eq!(rows[1].local_path, "/b.cloudf");
+        assert!(rows[1].is_folder);
+        assert_ne!(rows[0].id, rows[1].id);
+    }
+}
