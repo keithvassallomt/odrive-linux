@@ -13,7 +13,11 @@ enum Commands {
     /// Show current odrive status
     Status,
     /// List active mounts
-    Mounts,
+    Mounts {
+        /// Print only local mount paths, one per line (machine-readable).
+        #[arg(long)]
+        paths: bool,
+    },
     /// Start the odrive agent
     Start,
     /// Stop the odrive agent
@@ -62,10 +66,14 @@ fn main() {
                 Err(e) => eprintln!("Error getting status: {}", e),
             }
         }
-        Some(Commands::Mounts) => {
+        Some(Commands::Mounts { paths }) => {
             match agent.get_mounts() {
                 Ok(mounts) => {
-                    if mounts.is_empty() {
+                    if paths {
+                        for mount in mounts {
+                            println!("{}", mount.local_path);
+                        }
+                    } else if mounts.is_empty() {
                         println!("No active mounts found.");
                     } else {
                         println!("{:<40} {:<20} {:<10}", "Local Path", "Remote Path", "Status");

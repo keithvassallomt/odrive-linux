@@ -40,10 +40,41 @@ class OdriveExtension(GObject.GObject, Nautilus.MenuProvider):
                 'sync/unsync.',
                 file=sys.stderr,
             )
+            self.mounts = []
+        else:
+            self.mounts = self._discover_mounts()
+
+    def _discover_mounts(self):
+        """Query odrive-cli for the local mount paths. Cached at extension
+        init — restart Nautilus (`nautilus -q`) to pick up newly-added mounts.
+        On any failure, fall back to ['~/odrive'] so users with the default
+        layout aren't worse off than before.
+        """
+        try:
+            result = subprocess.run(
+                [self.cli_path, 'mounts', '--paths'],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (subprocess.SubprocessError, OSError) as e:
+            print(
+                f'odrive-linux Nautilus extension: failed to enumerate mounts '
+                f'({e}); falling back to ~/odrive.',
+                file=sys.stderr,
+            )
+            return [os.path.expanduser('~/odrive')]
+        if result.returncode != 0:
+            print(
+                f'odrive-linux Nautilus extension: odrive-cli mounts exited '
+                f'{result.returncode}; falling back to ~/odrive. stderr: '
+                f'{result.stderr.strip()}',
+                file=sys.stderr,
+            )
+            return [os.path.expanduser('~/odrive')]
+        paths = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        return paths or [os.path.expanduser('~/odrive')]
 
     def get_mounts(self):
-        # In the future, parse from 'odrive-cli mounts'
-        return [os.path.expanduser('~/odrive')]
+        return self.mounts
 
     def get_file_items(self, *args):
         files = args[-1]
