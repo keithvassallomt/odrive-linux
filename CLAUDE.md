@@ -11,6 +11,12 @@ odrive-linux is a native Linux frontend for [odrive](https://www.odrive.com)'s o
 
 This repository builds a higher-level manager around that agent: a Rust CLI, a GTK4/Libadwaita GUI, and a Python Nautilus extension. **None of this code talks to odrive's cloud directly** — every sync/unsync/status call shells out to the user's installed `odrive` binary at `~/.odrive-agent/bin/odrive`.
 
+**Design intent** — the manager wraps the agent so a GNOME user gets:
+1. **Daemon orchestration** — make sure `odriveagent` is up (systemd-user preferred, `nohup` fallback) and surface authenticate/mount as part of onboarding.
+2. **Local state for the UI** — scan the sync tree for `.cloud`/`.cloudf` and persist them in SQLite so the GUI doesn't have to re-shell-out for every paint.
+3. **Transparent on-demand sync** — Nautilus right-click triggers `odrive sync` against a `.cloud` placeholder so the file materializes before the OS hands control back.
+4. **Space management** — right-click "Unsync" calls `odrive unsync`, with the agent's `autounsyncthreshold` available as a longer-term auto-cleanup knob.
+
 ## Build / run
 
 The repo is a Cargo workspace with three crates plus one standalone Python file.
@@ -47,7 +53,7 @@ nautilus_extension.py  ──► target/debug/odrive-cli  ──► (same path t
 
 **`odrive-core`** is the only crate that knows how to talk to the agent. Two types matter:
 
-- `OdriveAgent` (lib.rs) — wraps every CLI subcommand (`status`, `mounts`, `sync`, `unsync`, `refresh`) plus daemon lifecycle (`start`/`stop` try `systemctl --user start odrive.service` first, fall back to `nohup odriveagent`). Also contains `scan_placeholders`, which walks a mount tree and upserts every `.cloud`/`.cloudf` it finds into the DB.
+- `OdriveAgent` (lib.rs) — wraps every CLI subcommand (`status`, `status --mounts`, `sync`, `unsync`, `refresh`) plus daemon lifecycle (`start`/`stop` try `systemctl --user start odrive.service` first, fall back to `nohup odriveagent`). Also contains `scan_placeholders`, which walks a mount tree and upserts every `.cloud`/`.cloudf` it finds into the DB.
 - `OdriveDb` (db.rs) — thin rusqlite wrapper around a single `placeholders` table (id, local_path, remote_path, is_folder, sync_status). The DB is the bridge between "what the CLI tells us" and "what the GUI renders" — the GUI never invokes the agent for placeholder counts, it reads from SQLite.
 
 **`odrive-cli`** is a clap-derive front-end that 1:1 maps subcommands onto `OdriveAgent` methods. `Status` and the no-subcommand default both print agent status plus the DB-tracked placeholder count.
@@ -58,8 +64,9 @@ nautilus_extension.py  ──► target/debug/odrive-cli  ──► (same path t
 
 ## Non-obvious things to know before editing
 
-- **CLI output parsing is whitespace-fragile.** `OdriveAgent::get_mounts` splits each line on whitespace and assumes 3 fields. Any mount path containing a space breaks it. Same brittleness applies to `is_running`, which substring-matches the literal string `"Unable to connect"` against the agent's stdout.
-- **`scan_placeholders` panics on DB errors.** The recursive `visit_dirs` calls `db.upsert_placeholder(...).unwrap()` — one bad row aborts the whole scan.
+- **Mount enumeration goes through `odrive status --mounts`, not `odrive mounts`.** The upstream CLI has no `mounts` subcommand — that name is *only* the `odrive-cli` wrapper subcommand we expose. The agent prints two lines per mount (`<local>  status:<state>` then `<remote>  status:<state>`, with remote rendering blank for the odrive root `/`); `parse_mounts` handles that pairing.
+- **`is_running` substring-matches `"Unable to connect"`** against the agent's combined stdout/stderr to catch the legacy case where older `odriveagent` builds returned exit 0 even when the daemon was unreachable.
+- **`scan_placeholders` is fault-tolerant per-entry.** Unreadable directory entries, recursion errors, and DB upsert failures all `log::warn!` and continue rather than aborting the scan. The returned count only includes successfully-recorded placeholders.
 - **The GUI's `update_ui` closure must stay `Clone` and `'static`-friendly.** It's cloned into each button handler. Adding non-`Clone` captures will break the build in non-obvious ways.
 - **The Nautilus extension's binary path is a known wart** — it points at `target/debug/odrive-cli` and will silently no-op once the user moves to a release/install layout.
 - **`odrive-core` re-exports `OdriveDb` from `lib.rs`.** Use `odrive_core::OdriveDb`, not `odrive_core::db::OdriveDb`.
@@ -67,16 +74,16 @@ nautilus_extension.py  ──► target/debug/odrive-cli  ──► (same path t
 ## Reference: the upstream `odrive` CLI surface this code wraps
 
 ```
-odrive status
+odrive status                # overview (also prints a Mounts: N count)
+odrive status --mounts       # list mounts (two lines each: local then remote)
 odrive mount <local> <remote>
-odrive mounts
+odrive unmount <local>
 odrive sync <path>           # download a .cloud, or expand a .cloudf
-odrive sync <path> --recursive --nodownload   # placeholder-only expansion
+odrive sync <path> --recursive --nodownload   # placeholder-only expansion (typical first run after mount)
 odrive unsync <path>         # revert local file to .cloud placeholder
+odrive unsync <path> --force # also discard un-uploaded local changes
 odrive refresh <path>        # re-check remote for changes
 odrive authenticate <key>
-odrive placeholderthreshold <never|small|medium|large|always>
-odrive autounsyncthreshold <never|day|week|month>
+odrive placeholderthreshold <never|small|medium|large|always>   # auto-download files under threshold size on expand
+odrive autounsyncthreshold <never|day|week|month>               # auto-cleanup files not accessed within window
 ```
-
-`research.md` has the longer-form notes, including the rationale for each command and the design intent of the manager app.

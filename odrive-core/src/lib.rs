@@ -7,31 +7,46 @@ use thiserror::Error;
 use std::path::Path;
 use std::fs;
 
-/// Split a line on runs of 2+ whitespace characters. This preserves single
-/// spaces inside fields (e.g. mount paths with spaces) which `split_whitespace`
-/// would shred.
-fn split_columns(line: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut ws_run = 0usize;
+/// Parse the stdout of `odrive status --mounts`. The agent prints two lines
+/// per mount: a local-path line and a remote-path line, each suffixed with
+/// `  status:<state>`. We split each line at the last `  status:` marker so
+/// paths containing the substring `status:` survive intact, then pair lines
+/// up. A trailing unpaired line is ignored.
+fn parse_mounts(stdout: &str) -> Vec<OdriveMount> {
+    fn split_path_status(line: &str) -> Option<(String, String)> {
+        let marker = "  status:";
+        let idx = line.rfind(marker)?;
+        let path = line[..idx].trim().to_string();
+        let status = line[idx + marker.len()..].trim().to_string();
+        Some((path, status))
+    }
 
-    for ch in line.chars() {
-        if ch.is_whitespace() {
-            ws_run += 1;
+    let lines: Vec<_> = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+
+    let mut mounts = Vec::new();
+    for chunk in lines.chunks(2) {
+        let Some((local_path, local_status)) = chunk.first().and_then(|l| split_path_status(l)) else {
+            continue;
+        };
+        let (remote_path, _remote_status) = chunk
+            .get(1)
+            .and_then(|l| split_path_status(l))
+            .unwrap_or_else(|| (String::new(), String::new()));
+        let remote_path = if remote_path.is_empty() {
+            "/".to_string()
         } else {
-            if ws_run >= 2 && !current.is_empty() {
-                out.push(std::mem::take(&mut current));
-            } else if ws_run >= 1 && !current.is_empty() {
-                current.push(' ');
-            }
-            current.push(ch);
-            ws_run = 0;
-        }
+            remote_path
+        };
+        mounts.push(OdriveMount {
+            local_path,
+            remote_path,
+            status: local_status,
+        });
     }
-    if !current.is_empty() {
-        out.push(current);
-    }
-    out
+    mounts
 }
 
 #[derive(Error, Debug)]
@@ -212,28 +227,29 @@ impl OdriveAgent {
     }
 
     pub fn get_mounts(&self) -> Result<Vec<OdriveMount>, OdriveError> {
+        // The upstream odrive CLI has no `mounts` subcommand — mount info is
+        // exposed via `odrive status --mounts`, which prints two lines per
+        // mount:
+        //     <localPath>  status:<state>
+        //     <remotePath>  status:<state>
+        // The remote path may render blank when it's the odrive root (`/`).
         let output = Command::new(&self.bin_path)
-            .arg("mounts")
+            .arg("status")
+            .arg("--mounts")
             .output()?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut mounts = Vec::new();
-
-        // `odrive mounts` separates columns with 2+ spaces, so paths containing
-        // single spaces survive intact. Lines with fewer than 3 columns (blanks,
-        // headers, footer text) are skipped.
-        for line in stdout.lines() {
-            let parts = split_columns(line);
-            if parts.len() >= 3 {
-                mounts.push(OdriveMount {
-                    local_path: parts[0].clone(),
-                    remote_path: parts[1].clone(),
-                    status: parts[2].clone(),
-                });
-            }
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let msg = if !stderr.is_empty() { stderr } else { stdout };
+            return Err(OdriveError::CliError(format!(
+                "odrive status --mounts failed: {}",
+                msg
+            )));
         }
 
-        Ok(mounts)
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(parse_mounts(&stdout))
     }
 
     pub fn get_db_path(&self) -> String {
@@ -283,3 +299,44 @@ impl OdriveAgent {
         Ok(count)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_mounts_single_root_mount() {
+        // Real output observed from `odrive status --mounts` with a single
+        // mount of /home/keith/odrive against the odrive root `/`. The remote
+        // path renders blank in that case.
+        let stdout = "/home/keith/odrive  status:Active\n  status:None\n";
+        let mounts = parse_mounts(stdout);
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].local_path, "/home/keith/odrive");
+        assert_eq!(mounts[0].remote_path, "/");
+        assert_eq!(mounts[0].status, "Active");
+    }
+
+    #[test]
+    fn parse_mounts_two_mounts_with_remote_paths() {
+        let stdout = "\
+/home/keith/gd  status:Active
+/Google Drive  status:None
+/home/keith/od  status:Active
+/OneDrive  status:None
+";
+        let mounts = parse_mounts(stdout);
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[0].local_path, "/home/keith/gd");
+        assert_eq!(mounts[0].remote_path, "/Google Drive");
+        assert_eq!(mounts[1].local_path, "/home/keith/od");
+        assert_eq!(mounts[1].remote_path, "/OneDrive");
+    }
+
+    #[test]
+    fn parse_mounts_empty_input() {
+        assert!(parse_mounts("").is_empty());
+        assert!(parse_mounts("\n\n").is_empty());
+    }
+}
+
