@@ -58,7 +58,7 @@ nautilus_extension.py  ──► target/debug/odrive-cli  ──► (same path t
 
 **`odrive-cli`** is a clap-derive front-end that 1:1 maps subcommands onto `OdriveAgent` methods. `Status` and the no-subcommand default both print agent status plus the DB-tracked placeholder count.
 
-**`odrive-gui`** is a single-window Libadwaita app. The whole UI is built imperatively in `main.rs` — there is no separate view layer. State updates happen via a closure (`update_ui`) that's cloned into every button handler. **There is currently no background polling** — UI only refreshes when the user clicks a button, so external state changes (e.g. a sync finishing in the background) are invisible until you click something.
+**`odrive-gui`** is a single-window Libadwaita app. The whole UI is built imperatively in `main.rs` — there is no separate view layer. State updates happen via a closure (`update_ui`) that's cloned into every button handler and into a 5s `glib::timeout_add_seconds_local` background poll. The poll runs the same synchronous shell-outs as a click, so a slow `odrive` response will briefly stutter the UI; if that ever becomes visible the next step is to move IO to a worker thread and post results back via `glib::idle_add_local`.
 
 **`nautilus_extension.py`** plugs into Nautilus's `MenuProvider`. On right-click it inspects selected files: `.cloud`/`.cloudf` get a "Sync with odrive" item, regular files inside a known mount get an "Unsync" item. Both shell out to the `odrive-cli` debug binary. The extension is **not** wired into a release build path — `self.cli_path` points at `target/debug/odrive-cli`.
 

@@ -130,6 +130,21 @@ fn main() {
         // Initial update
         update_ui();
 
+        // Background poll — refreshes status, placeholder count, and the
+        // mount list every 5s so external state changes (a sync completing,
+        // the agent restarting, a fresh mount) surface without requiring the
+        // user to click. Each tick runs the same synchronous shell-outs the
+        // button handlers do, so on a slow agent response the UI may briefly
+        // stutter. If that becomes visible, move the IO to a worker thread
+        // and post results back via glib::idle_add_local.
+        gtk::glib::timeout_add_seconds_local(5, {
+            let update = update_ui.clone();
+            move || {
+                update();
+                gtk::glib::ControlFlow::Continue
+            }
+        });
+
         // Button actions
         start_stop_btn.connect_clicked({
             let agent = agent.clone();
