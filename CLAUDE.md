@@ -60,7 +60,7 @@ nautilus_extension.py  ──► target/debug/odrive-cli  ──► (same path t
 
 **`odrive-gui`** is a single-window Libadwaita app. The whole UI is built imperatively in `main.rs` — there is no separate view layer. State updates happen via a closure (`update_ui`) that's cloned into every button handler and into a 5s `glib::timeout_add_seconds_local` background poll. The poll runs the same synchronous shell-outs as a click, so a slow `odrive` response will briefly stutter the UI; if that ever becomes visible the next step is to move IO to a worker thread and post results back via `glib::idle_add_local`.
 
-**`nautilus_extension.py`** plugs into Nautilus's `MenuProvider`. On right-click it inspects selected files: `.cloud`/`.cloudf` get a "Sync with odrive" item, regular files inside a known mount get an "Unsync" item. Both shell out to the `odrive-cli` debug binary. The extension is **not** wired into a release build path — `self.cli_path` points at `target/debug/odrive-cli`.
+**`nautilus_extension.py`** plugs into Nautilus's `MenuProvider`. On right-click it inspects selected files: `.cloud`/`.cloudf` get a "Sync with odrive" item, regular files inside a known mount get an "Unsync" item. Both shell out to `odrive-cli`, located via `_find_cli`: `$ODRIVE_CLI` override → `$PATH` lookup → `target/release/odrive-cli` → `target/debug/odrive-cli` (relative to the extension file). If none resolve, the extension loads but stays inert (no menu items) and prints a one-shot stderr hint at init.
 
 ## Non-obvious things to know before editing
 
@@ -68,7 +68,6 @@ nautilus_extension.py  ──► target/debug/odrive-cli  ──► (same path t
 - **`is_running` substring-matches `"Unable to connect"`** against the agent's combined stdout/stderr to catch the legacy case where older `odriveagent` builds returned exit 0 even when the daemon was unreachable.
 - **`scan_placeholders` is fault-tolerant per-entry.** Unreadable directory entries, recursion errors, and DB upsert failures all `log::warn!` and continue rather than aborting the scan. The returned count only includes successfully-recorded placeholders.
 - **The GUI's `update_ui` closure must stay `Clone` and `'static`-friendly.** It's cloned into each button handler. Adding non-`Clone` captures will break the build in non-obvious ways.
-- **The Nautilus extension's binary path is a known wart** — it points at `target/debug/odrive-cli` and will silently no-op once the user moves to a release/install layout.
 - **`odrive-core` re-exports `OdriveDb` from `lib.rs`.** Use `odrive_core::OdriveDb`, not `odrive_core::db::OdriveDb`.
 
 ## Reference: the upstream `odrive` CLI surface this code wraps

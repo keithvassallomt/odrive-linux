@@ -1,10 +1,45 @@
 import os
+import shutil
 import subprocess
+import sys
 from gi.repository import Nautilus, GObject
+
+
+def _find_cli():
+    """Locate odrive-cli. Priority: $ODRIVE_CLI, $PATH, release build, debug build.
+
+    Returns the absolute path, or None if no usable binary is found — in which
+    case the extension stays loaded but renders no menu items rather than
+    silently invoking a missing executable on every right-click.
+    """
+    override = os.environ.get('ODRIVE_CLI')
+    if override and os.path.isfile(override) and os.access(override, os.X_OK):
+        return override
+
+    on_path = shutil.which('odrive-cli')
+    if on_path:
+        return on_path
+
+    here = os.path.dirname(os.path.realpath(__file__))
+    for relative in ('target/release/odrive-cli', 'target/debug/odrive-cli'):
+        candidate = os.path.join(here, relative)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+
+    return None
+
 
 class OdriveExtension(GObject.GObject, Nautilus.MenuProvider):
     def __init__(self):
-        self.cli_path = os.path.expanduser('~/LocalCode/keithvassallomt/odrive-linux/target/debug/odrive-cli')
+        self.cli_path = _find_cli()
+        if self.cli_path is None:
+            print(
+                'odrive-linux Nautilus extension: odrive-cli not found. '
+                'Set $ODRIVE_CLI, install odrive-cli on PATH, or build the '
+                'workspace (cargo build [--release]) to enable right-click '
+                'sync/unsync.',
+                file=sys.stderr,
+            )
 
     def get_mounts(self):
         # In the future, parse from 'odrive-cli mounts'
@@ -12,7 +47,7 @@ class OdriveExtension(GObject.GObject, Nautilus.MenuProvider):
 
     def get_file_items(self, *args):
         files = args[-1]
-        if not files:
+        if not files or self.cli_path is None:
             return []
 
         mounts = self.get_mounts()
