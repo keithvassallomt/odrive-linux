@@ -66,7 +66,7 @@ nautilus_extension.py  ──► target/debug/odrive-cli  ──► (same path t
 ## Non-obvious things to know before editing
 
 - **Mount enumeration goes through `odrive status --mounts`, not `odrive mounts`.** The upstream CLI has no `mounts` subcommand — that name is *only* the `odrive-cli` wrapper subcommand we expose. The agent prints two lines per mount (`<local>  status:<state>` then `<remote>  status:<state>`, with remote rendering blank for the odrive root `/`); `parse_mounts` handles that pairing.
-- **`is_running` substring-matches `"Unable to connect"`** against the agent's combined stdout/stderr to catch the legacy case where older `odriveagent` builds returned exit 0 even when the daemon was unreachable.
+- **`is_running` requires both a live agent process *and* a clean `odrive status` exit.** Process aliveness comes from `pgrep -f <agent_path>` (stable contract regardless of upstream wording); the status exit catches the brief window where the process is up but the IPC isn't yet bound or has wedged. `get_status` shares the same process check so the two never disagree.
 - **`scan_placeholders` is fault-tolerant per-entry.** Unreadable directory entries, recursion errors, and DB upsert failures all `log::warn!` and continue rather than aborting the scan. The returned count only includes successfully-recorded placeholders.
 - **The GUI's `update_ui` closure must stay `Clone` and `'static`-friendly.** It's cloned into each button handler. Adding non-`Clone` captures will break the build in non-obvious ways.
 - **`odrive-core` re-exports `OdriveDb` from `lib.rs`.** Use `odrive_core::OdriveDb`, not `odrive_core::db::OdriveDb`.

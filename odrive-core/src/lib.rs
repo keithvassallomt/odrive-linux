@@ -107,24 +107,43 @@ impl OdriveAgent {
         Path::new(&self.bin_path).exists()
     }
 
+    /// True if the agent process is alive on the system. Uses `pgrep -f`
+    /// against the canonical agent path — a stable upstream contract,
+    /// since both the systemd unit and our nohup fallback launch the
+    /// binary at exactly that path.
+    fn agent_process_alive(&self) -> bool {
+        Command::new("pgrep")
+            .arg("-f")
+            .arg(&self.agent_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
     pub fn is_running(&self) -> bool {
         if !self.binary_exists() {
             return false;
         }
-        match Command::new(&self.bin_path).arg("status").output() {
-            Ok(out) => {
-                // Primary signal: a successful exit. Secondary: the legacy
-                // "Unable to connect" marker, since older odrive builds
-                // returned 0 even when the daemon was unreachable.
-                let combined = format!(
-                    "{}{}",
-                    String::from_utf8_lossy(&out.stdout),
-                    String::from_utf8_lossy(&out.stderr),
-                );
-                out.status.success() && !combined.contains("Unable to connect")
-            }
-            Err(_) => false,
+        // Two signals, both required:
+        //   1. The agent process is alive (pgrep against the agent path).
+        //   2. `odrive status` exits cleanly — catches the small window
+        //      where the process is up but the daemon hasn't yet bound
+        //      its IPC, or has wedged.
+        // This replaces an earlier substring match against
+        // "Unable to connect" in stdout/stderr, which was fragile to
+        // upstream wording changes; the bare exit-code check on its own
+        // also doesn't suffice because older `odrive` builds returned 0
+        // even when the daemon was unreachable.
+        if !self.agent_process_alive() {
+            return false;
         }
+        Command::new(&self.bin_path)
+            .arg("status")
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
     }
 
     pub fn start(&self) -> Result<(), OdriveError> {
@@ -188,14 +207,10 @@ impl OdriveAgent {
         }
 
         let output = Command::new(&self.bin_path).arg("status").output()?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let is_running =
-            output.status.success() && !stdout.contains("Unable to connect") && !stderr.contains("Unable to connect");
-
+        let process_alive = self.agent_process_alive();
         Ok(OdriveStatus {
-            is_running,
-            sync_status: stdout.to_string(),
+            is_running: process_alive && output.status.success(),
+            sync_status: String::from_utf8_lossy(&output.stdout).to_string(),
         })
     }
 
