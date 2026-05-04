@@ -26,8 +26,8 @@ cargo build                          # build all three crates
 cargo build --release                # release build
 cargo check                          # fast type-check across the workspace
 cargo run -p odrive-cli -- <subcmd>  # run the CLI (status, mounts, sync, unsync, refresh, scan, start, stop)
-cargo run -p odrive-gui              # launch the GTK dashboard
-cargo test -p <crate>                # no tests exist yet — adding them is open work
+cargo run -p odrive-gui              # launch the GTK app (wizard or dashboard depending on state)
+cargo test --workspace               # 13 unit tests across odrive-core (config, db, parsers)
 ```
 
 The GUI requires GTK4 and Libadwaita 1.5+ system libraries (`libgtk-4-dev`, `libadwaita-1-dev` on Debian/Ubuntu).
@@ -36,30 +36,36 @@ The GUI requires GTK4 and Libadwaita 1.5+ system libraries (`libgtk-4-dev`, `lib
 
 These are not installed by this repo — the user must have them set up before any of this code is useful:
 
-1. **odrive agent binaries** at `~/.odrive-agent/bin/{odrive,odriveagent}` (paths hard-coded in `odrive-core/src/lib.rs::OdriveAgent::new`).
-2. **Authentication** done out-of-band via `odrive authenticate <key>`.
-3. **At least one mount** created via `odrive mount <local> <remote>`. The conventional local mount is `~/odrive`.
+1. **odrive agent binaries** — `odrive` and `odriveagent` in a directory `OdriveAgent::new()` reads from `~/.config/odrive-linux/config.toml` (key: `agent_bin_dir`, default `~/.odrive-agent/bin`). The GUI's onboarding wizard installs them on first launch via the official `dl.odrive.com` pipeline if missing, or accepts a custom path.
+2. **Authentication** — `odrive authenticate <key>`, surfaced through the wizard's Login page or invokable directly.
+3. **At least one mount** — `odrive mount <local> <remote>`. The wizard offers an optional Mount page (`~/odrive` ↔ `/`) at the end; users can skip and mount later.
 4. **State DB** at `~/.odrive-linux.db` — created automatically on first `scan` or GUI launch.
 5. **`python3-nautilus`** (only for the right-click integration) — Debian/Ubuntu `python3-nautilus`, Fedora `nautilus-python`, Arch `python-nautilus`. Without it the extension file is never loaded by Nautilus, even when symlinked into `~/.local/share/nautilus-python/extensions/`. Not auto-installed by anything in this repo.
+
+The first three are walked through automatically by the GUI's onboarding wizard on first launch. See "Onboarding wizard" below.
 
 ## Architecture
 
 ```
-odrive-cli  ──┐
-              ├──► odrive-core ──► (Command::new) ──► ~/.odrive-agent/bin/odrive
-odrive-gui  ──┘                └─► ~/.odrive-linux.db (SQLite)
+odrive-cli  ──┐                 ┌─► <agent_bin_dir>/odrive   (configured via)
+              ├──► odrive-core ─┼─► ~/.odrive-linux.db        (SQLite — placeholder rows)
+odrive-gui  ──┘                 └─► ~/.config/odrive-linux/config.toml  (XDG — agent_bin_dir)
 
-nautilus_extension.py  ──► target/debug/odrive-cli  ──► (same path through odrive-core)
+nautilus_extension.py  ──► odrive-cli (via _find_cli) ──► (same path through odrive-core)
 ```
 
-**`odrive-core`** is the only crate that knows how to talk to the agent. Two types matter:
+**`odrive-core`** is the only crate that knows how to talk to the agent. Three types matter:
 
-- `OdriveAgent` (lib.rs) — wraps every CLI subcommand (`status`, `status --mounts`, `sync`, `unsync`, `refresh`) plus daemon lifecycle (`start`/`stop` try `systemctl --user start odrive.service` first, fall back to `nohup odriveagent`). Also contains `scan_placeholders`, which walks a mount tree and upserts every `.cloud`/`.cloudf` it finds into the DB.
+- `OdriveAgent` (lib.rs) — wraps every CLI subcommand the manager uses (`status`, `status --mounts`, `sync`, `unsync`, `refresh`, `mount`, `authenticate`) plus daemon lifecycle (`start`/`stop` try `systemctl --user start odrive.service` first, fall back to `nohup odriveagent`). Onboarding helpers: `is_authenticated()`, `install_official()` (runs the dl.odrive.com curl+tar pipeline), `write_systemd_unit()` (templates the unit's `ExecStart` with the current `agent_path`), `enable_systemd_unit()`, `enable_linger()`. Path-resolution helpers: `default_mount_path()` (`~/odrive`), `with_new_bin_dir()` (rebuild after the wizard's "specify custom location" branch). Also contains `scan_placeholders`, which walks a mount tree and upserts every `.cloud`/`.cloudf` it finds into the DB.
 - `OdriveDb` (db.rs) — thin rusqlite wrapper around a single `placeholders` table (id, local_path, remote_path, is_folder, sync_status). The DB is the bridge between "what the CLI tells us" and "what the GUI renders" — the GUI never invokes the agent for placeholder counts, it reads from SQLite.
+- `OdriveConfig` (config.rs) — `~/.config/odrive-linux/config.toml`. Currently a single key, `agent_bin_dir`, set by the wizard's "specify custom location" branch. Load is fault-tolerant: missing file or unparseable TOML both fall back to defaults rather than erroring (a fresh-system run is the common case, not a bug).
 
 **`odrive-cli`** is a clap-derive front-end that 1:1 maps subcommands onto `OdriveAgent` methods. `Status` and the no-subcommand default both print agent status plus the DB-tracked placeholder count.
 
-**`odrive-gui`** is a single-window Libadwaita app. The whole UI is built imperatively in `main.rs` — there is no separate view layer. State updates happen via a closure (`update_ui`) that's cloned into every button handler and into a 5s `glib::timeout_add_seconds_local` background poll. The poll runs the same synchronous shell-outs as a click, so a slow `odrive` response will briefly stutter the UI; if that ever becomes visible the next step is to move IO to a worker thread and post results back via `glib::idle_add_local`.
+**`odrive-gui`** is a Libadwaita app split into two surfaces, each its own `ApplicationWindow`:
+
+- **Onboarding wizard** (`wizard.rs`) — `Adw.NavigationView` with up to four pages (Install / Service / Login / optional Mount). At `connect_activate`, `main.rs::needs_wizard()` checks all four preconditions; if any fails the wizard window is presented, otherwise the dashboard goes straight up. Pages advance dynamically: each successful action re-runs `push_next` which checks every precondition fresh and pushes the next failing one (or closes the wizard). The wizard's agent is held in `Rc<RefCell<OdriveAgent>>` because the Install page can swap the active bin directory mid-flow. Long-running ops (install download, mount) run synchronously on the GTK thread for now — same trade-off as the dashboard.
+- **Dashboard** (`main.rs::present_dashboard`) — single-window status panel built imperatively. State updates happen via an `update_ui` closure cloned into every button handler and into a 5s `glib::timeout_add_seconds_local` background poll. The poll runs the same synchronous shell-outs as a click, so a slow `odrive` response will briefly stutter the UI; if that ever becomes visible the next step is to move IO to a worker thread and post results back via `glib::idle_add_local`.
 
 **`nautilus_extension.py`** plugs into Nautilus's `MenuProvider`. On right-click it inspects selected files: `.cloud`/`.cloudf` get a "Sync with odrive" item, regular files inside a known mount get an "Unsync" item. Both shell out to `odrive-cli`, located via `_find_cli`: `$ODRIVE_CLI` override → `$PATH` lookup → `target/release/odrive-cli` → `target/debug/odrive-cli` (relative to the extension file). If none resolve, the extension loads but stays inert (no menu items) and prints a one-shot stderr hint at init. The mount list is discovered at extension init via `odrive-cli mounts --paths` and cached for the lifetime of the Nautilus process — restart Nautilus (`nautilus -q`) to pick up newly-added mounts. On any discovery failure the extension falls back to `[~/odrive]` so users with the conventional layout aren't broken.
 
