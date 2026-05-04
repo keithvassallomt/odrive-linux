@@ -29,7 +29,7 @@ def _find_cli():
     return None
 
 
-class OdriveExtension(GObject.GObject, Nautilus.MenuProvider):
+class OdriveExtension(GObject.GObject, Nautilus.MenuProvider, Nautilus.InfoProvider):
     def __init__(self):
         self.cli_path = _find_cli()
         if self.cli_path is None:
@@ -126,3 +126,22 @@ class OdriveExtension(GObject.GObject, Nautilus.MenuProvider):
     def on_unsync_clicked(self, menu, paths):
         for path in paths:
             subprocess.run([self.cli_path, 'unsync', path], check=False)
+
+    # InfoProvider — paint a "remote-only" badge on `.cloud` /
+    # `.cloudf` placeholders. Materialised files get no emblem
+    # (synced is the default state and badging every regular file in
+    # `~/odrive` would just be noise). A future syncing emblem on
+    # parent folders during in-flight `odrive sync` is tracked
+    # separately and will read in-progress state from the workspace
+    # SQLite DB.
+    #
+    # `emblem-downloads` is a pragmatic choice: Yaru (Ubuntu default)
+    # ships it and Nautilus falls back to the active GTK theme so it
+    # works on most distros; the semantic is "downloadable" rather
+    # than "in the Downloads folder", close enough for V1. Swap to a
+    # bundled `emblem-odrive-cloud-symbolic` if/when we package one.
+    def update_file_info(self, file):
+        name = file.get_name()
+        if name.endswith('.cloud') or name.endswith('.cloudf'):
+            file.add_emblem('emblem-downloads')
+        return Nautilus.OperationResult.COMPLETE
