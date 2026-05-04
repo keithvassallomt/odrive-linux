@@ -64,6 +64,15 @@ fn parse_mounts(stdout: &str) -> Vec<OdriveMount> {
         let Some((local_path, local_status)) = chunk.first().and_then(|l| split_path_status(l)) else {
             continue;
         };
+        // Skip orphan trailing lines that look like a remote-side row but
+        // have no matching local path. The agent emits `  status:None` as
+        // the second line of every mount (remote half for an odrive-root
+        // mount); when the user removes the last mount, that line still
+        // shows up by itself and would otherwise produce a phantom row
+        // with an empty local_path.
+        if local_path.is_empty() {
+            continue;
+        }
         let (remote_path, _remote_status) = chunk
             .get(1)
             .and_then(|l| split_path_status(l))
@@ -820,6 +829,14 @@ mod tests {
     fn parse_mounts_empty_input() {
         assert!(parse_mounts("").is_empty());
         assert!(parse_mounts("\n\n").is_empty());
+    }
+
+    #[test]
+    fn parse_mounts_orphan_remote_line_yields_no_mount() {
+        // After unmounting the last mount, the agent still emits the
+        // remote-side line `  status:None` by itself. That has no local
+        // path and shouldn't materialise as a phantom mount in the GUI.
+        assert!(parse_mounts("  status:None\n").is_empty());
     }
 
     #[test]
