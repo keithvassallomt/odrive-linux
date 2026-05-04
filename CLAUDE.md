@@ -27,7 +27,7 @@ cargo build --release                # release build
 cargo check                          # fast type-check across the workspace
 cargo run -p odrive-cli -- <subcmd>  # run the CLI (status, mounts, sync, unsync, refresh, scan, start, stop)
 cargo run -p odrive-gui              # launch the GTK app (wizard or dashboard depending on state)
-cargo test --workspace               # 13 unit tests across odrive-core (config, db, parsers)
+cargo test --workspace               # 18 unit tests across odrive-core (config, db, parsers, threshold round-trip)
 ```
 
 The GUI requires GTK4 and Libadwaita 1.5+ system libraries (`libgtk-4-dev`, `libadwaita-1-dev` on Debian/Ubuntu).
@@ -65,7 +65,8 @@ nautilus_extension.py  ──► odrive-cli (via _find_cli) ──► (same path
 **`odrive-gui`** is a Libadwaita app split into two surfaces, each its own `ApplicationWindow`:
 
 - **Onboarding wizard** (`wizard.rs`) — `Adw.NavigationView` with up to four pages (Install / Service / Login / optional Mount). At `connect_activate`, `main.rs::needs_wizard()` checks all four preconditions; if any fails the wizard window is presented, otherwise the dashboard goes straight up. Pages advance dynamically: each successful action re-runs `push_next` which checks every precondition fresh and pushes the next failing one (or closes the wizard). The wizard's agent is held in `Rc<RefCell<OdriveAgent>>` because the Install page can swap the active bin directory mid-flow. Long-running ops (install download, mount) run synchronously on the GTK thread for now — same trade-off as the dashboard.
-- **Dashboard** (`main.rs::present_dashboard`) — single-window status panel built imperatively. State updates happen via an `update_ui` closure cloned into every button handler and into a 5s `glib::timeout_add_seconds_local` background poll. The poll runs the same synchronous shell-outs as a click, so a slow `odrive` response will briefly stutter the UI; if that ever becomes visible the next step is to move IO to a worker thread and post results back via `glib::idle_add_local`.
+- **Dashboard** (`main.rs::present_dashboard`) — wrapped in an `Adw.NavigationView` so subpages (currently the Settings page) can be pushed onto the same window. Built imperatively; state updates flow through an `update_ui` closure cloned into every button handler and into a 5s `glib::timeout_add_seconds_local` background poll. Each mount row gets a trailing "Unmount" button that pops an `Adw.MessageDialog` confirmation before calling `agent.unmount(local)`. The header has a gear button that pushes the Settings page. The poll runs the same synchronous shell-outs as a click, so a slow `odrive` response will briefly stutter the UI; if that ever becomes visible the next step is to move IO to a worker thread and post results back via `glib::idle_add_local`.
+- **Settings page** (`settings_page.rs`) — three `Adw.ComboRow` widgets bound to the `PlaceholderThreshold` / `XlThreshold` / `AutoUnsyncThreshold` enums in `odrive-core`. Selection changes apply immediately (no Save button — same idiom as GNOME Settings) by calling the matching `OdriveAgent` setter. On CLI failure (e.g. `autounsyncthreshold` rejected on a non-premium account) the row is reverted to the value the agent reports, gated by a shared re-entrancy `RefCell<bool>` to keep the revert from re-firing the handler. We don't gate any UI on subscription tier — show all options to everyone and let upstream errors surface as toasts.
 
 **`nautilus_extension.py`** plugs into Nautilus's `MenuProvider`. On right-click it inspects selected files: `.cloud`/`.cloudf` get a "Sync with odrive" item, regular files inside a known mount get an "Unsync" item. Both shell out to `odrive-cli`, located via `_find_cli`: `$ODRIVE_CLI` override → `$PATH` lookup → `target/release/odrive-cli` → `target/debug/odrive-cli` (relative to the extension file). If none resolve, the extension loads but stays inert (no menu items) and prints a one-shot stderr hint at init. The mount list is discovered at extension init via `odrive-cli mounts --paths` and cached for the lifetime of the Nautilus process — restart Nautilus (`nautilus -q`) to pick up newly-added mounts. On any discovery failure the extension falls back to `[~/odrive]` so users with the conventional layout aren't broken.
 
@@ -91,5 +92,9 @@ odrive unsync <path> --force # also discard un-uploaded local changes
 odrive refresh <path>        # re-check remote for changes
 odrive authenticate <key>
 odrive placeholderthreshold <never|small|medium|large|always>   # auto-download files under threshold size on expand
-odrive autounsyncthreshold <never|day|week|month>               # auto-cleanup files not accessed within window
+odrive xlthreshold <never|small|medium|large|xlarge>            # split files larger than this into chunks on upload
+odrive autounsyncthreshold <never|day|week|month>               # auto-cleanup files not accessed within window (premium)
+odrive shutdown                                                 # terminate the agent cleanly
 ```
+
+**Threshold-token asymmetry to know about.** The CLI accepts `never`/`always` for `placeholderthreshold` and `xlarge` for `xlthreshold`; the *same* values render in `odrive status` text as `neverDownload` / `alwaysDownload` / `extraLarge`. `odrive-core::parse_global_settings` accepts both renderings; the CLI-arg side uses the short form via `<Enum>::as_cli_arg()`.

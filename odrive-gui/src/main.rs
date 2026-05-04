@@ -1,9 +1,13 @@
+mod settings_page;
 mod wizard;
 
 use libadwaita as adw;
 use adw::prelude::*;
 use adw::gtk as gtk;
-use adw::{ActionRow, ApplicationWindow, HeaderBar, Toast, ToastOverlay};
+use adw::{
+    ActionRow, ApplicationWindow, HeaderBar, MessageDialog, NavigationPage,
+    NavigationView, ResponseAppearance, Toast, ToastOverlay,
+};
 use gtk::{Application, Box, ListBox, Orientation, Button, Label};
 use odrive_core::{OdriveAgent, OdriveDb};
 use std::path::Path;
@@ -57,13 +61,49 @@ fn needs_wizard(agent: &OdriveAgent) -> bool {
 fn present_dashboard(app: &Application) {
     let agent = Rc::new(OdriveAgent::new());
 
+    let nav = NavigationView::new();
     let overlay = ToastOverlay::new();
-    let content = Box::new(Orientation::Vertical, 0);
-    overlay.set_child(Some(&content));
+    overlay.set_child(Some(&nav));
 
-    // Header
+    let dashboard_page = build_dashboard_page(agent.clone(), overlay.clone(), nav.clone());
+    nav.push(&dashboard_page);
+
+    let window = ApplicationWindow::builder()
+        .application(app)
+        .title("odrive Manager")
+        .default_width(640)
+        .default_height(480)
+        .content(&overlay)
+        .build();
+
+    window.present();
+}
+
+fn build_dashboard_page(
+    agent: Rc<OdriveAgent>,
+    overlay: ToastOverlay,
+    nav: NavigationView,
+) -> NavigationPage {
+    let outer = Box::new(Orientation::Vertical, 0);
+
+    // Header with a trailing gear button that pushes the Settings page.
     let header = HeaderBar::new();
-    content.append(&header);
+    let settings_btn = Button::builder()
+        .icon_name("emblem-system-symbolic")
+        .tooltip_text("Global Settings")
+        .build();
+    settings_btn.add_css_class("flat");
+    {
+        let agent = agent.clone();
+        let overlay = overlay.clone();
+        let nav = nav.clone();
+        settings_btn.connect_clicked(move |_| {
+            let page = settings_page::build(agent.clone(), overlay.clone());
+            nav.push(&page);
+        });
+    }
+    header.pack_end(&settings_btn);
+    outer.append(&header);
 
     // Status Group
     let list = ListBox::new();
@@ -104,7 +144,7 @@ fn present_dashboard(app: &Application) {
     db_row.add_suffix(&scan_btn);
     list.append(&db_row);
 
-    content.append(&list);
+    outer.append(&list);
 
     // Mounts List
     let mount_list_title = Label::builder()
@@ -114,7 +154,7 @@ fn present_dashboard(app: &Application) {
         .margin_top(12)
         .build();
     mount_list_title.add_css_class("heading");
-    content.append(&mount_list_title);
+    outer.append(&mount_list_title);
 
     let mount_list = ListBox::new();
     mount_list.add_css_class("boxed-list");
@@ -122,15 +162,18 @@ fn present_dashboard(app: &Application) {
     mount_list.set_margin_bottom(24);
     mount_list.set_margin_start(24);
     mount_list.set_margin_end(24);
-    content.append(&mount_list);
+    outer.append(&mount_list);
 
-    // Update function
+    // Update function — refreshes status, placeholder count, and rebuilds
+    // the mount list. Each mount row gets a trailing "Unmount" button
+    // that pops a confirmation dialog before calling the agent.
     let update_ui = {
         let agent = agent.clone();
         let status_label = status_label.clone();
         let start_stop_btn = start_stop_btn.clone();
         let db_row = db_row.clone();
         let mount_list = mount_list.clone();
+        let overlay_for_unmount = overlay.clone();
         move || {
             let is_running = agent.is_running();
             status_label.set_label(if is_running { "Running" } else { "Stopped" });
@@ -158,6 +201,25 @@ fn present_dashboard(app: &Application) {
                             .title(&mount.local_path)
                             .subtitle(&format!("Remote: {} ({})", mount.remote_path, mount.status))
                             .build();
+                        let unmount_btn = Button::builder()
+                            .label("Unmount")
+                            .valign(gtk::Align::Center)
+                            .build();
+                        unmount_btn.add_css_class("flat");
+                        {
+                            let agent = agent.clone();
+                            let overlay = overlay_for_unmount.clone();
+                            let local = mount.local_path.clone();
+                            unmount_btn.connect_clicked(move |btn| {
+                                confirm_and_unmount(
+                                    btn.upcast_ref::<gtk::Widget>(),
+                                    agent.clone(),
+                                    overlay.clone(),
+                                    local.clone(),
+                                );
+                            });
+                        }
+                        row.add_suffix(&unmount_btn);
                         mount_list.append(&row);
                     }
                 }
@@ -220,13 +282,53 @@ fn present_dashboard(app: &Application) {
         }
     });
 
-    let window = ApplicationWindow::builder()
-        .application(app)
+    NavigationPage::builder()
         .title("odrive Manager")
-        .default_width(600)
-        .default_height(400)
-        .content(&overlay)
-        .build();
+        .child(&outer)
+        .can_pop(false)
+        .build()
+}
 
-    window.present();
+/// Pop a destructive-style confirmation dialog before calling
+/// `agent.unmount`. We don't try to delete already-synced files — the
+/// upstream's behaviour is to leave them on disk, and matching that is
+/// less surprising than offering a "wipe everything" option that the
+/// user might fire by accident.
+fn confirm_and_unmount(
+    parent: &gtk::Widget,
+    agent: Rc<OdriveAgent>,
+    overlay: ToastOverlay,
+    local_path: String,
+) {
+    let window = parent
+        .root()
+        .and_then(|r| r.downcast::<gtk::Window>().ok());
+    let dialog = MessageDialog::builder()
+        .heading("Remove this mount?")
+        .body(format!(
+            "This unmounts {} from odrive. Already-synced files stay on disk; placeholders for unsynced files become inert. You can re-mount later from the Manager.",
+            local_path
+        ))
+        .modal(true)
+        .build();
+    if let Some(w) = window.as_ref() {
+        dialog.set_transient_for(Some(w));
+    }
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("unmount", "Unmount");
+    dialog.set_response_appearance("unmount", ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+
+    let local_path_for_cb = local_path.clone();
+    dialog.connect_response(None, move |dlg, response| {
+        if response == "unmount" {
+            match agent.unmount(&local_path_for_cb) {
+                Ok(_) => overlay.add_toast(Toast::new("Mount removed")),
+                Err(e) => overlay.add_toast(Toast::new(&format!("Unmount failed: {}", e))),
+            }
+        }
+        dlg.close();
+    });
+    dialog.present();
 }
