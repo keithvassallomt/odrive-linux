@@ -690,6 +690,11 @@ fn build_rule_group(state: &Rc<PageState>) -> PreferencesGroup {
                             )));
                         }
                     }
+                    // Nudge Nautilus to re-render the folder's emblem:
+                    // a folder with a rule gets the synced emblem, so
+                    // adding/changing one should flip immediately
+                    // rather than wait on the extension's TTL cache.
+                    touch_mtime(&state.folder_path);
 
                     // foldersyncrule applies to *new* remote content
                     // only (per upstream docs: "Set rule for automatically
@@ -801,6 +806,11 @@ fn confirm_delete_rule(button: &Button, state: Rc<PageState>) {
                     if let Some(db) = open_db(&state.agent) {
                         let _ = db.delete_folder_rule(&state.folder_path);
                     }
+                    // Synced emblem disappears immediately on rule
+                    // removal. The optional unsync that follows will
+                    // eventually replace the folder with a `.cloudf`
+                    // (Nautilus picks that up via inotify on its own).
+                    touch_mtime(&state.folder_path);
                     if also_unsync {
                         state.overlay.add_toast(Toast::new(
                             "Rule removed — unsyncing local files…",
