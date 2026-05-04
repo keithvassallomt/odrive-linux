@@ -5,6 +5,12 @@ use std::path::{Path, PathBuf};
 
 const CONFIG_REL: &str = ".config/odrive-linux/config.toml";
 
+/// Recognised tray-icon colour names. Must match the `odrive-tray-<name>`
+/// icon set installed by `odrive-cli install-handlers`. Order is the order
+/// the Settings combobox renders.
+pub const TRAY_ICON_COLORS: &[&str] = &["pink", "white", "black", "darkgrey", "grey"];
+pub const DEFAULT_TRAY_ICON_COLOR: &str = "pink";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OdriveConfig {
     /// Directory containing the upstream `odrive` and `odriveagent` bins.
@@ -12,6 +18,13 @@ pub struct OdriveConfig {
     /// is missing.
     #[serde(default = "default_agent_bin_dir")]
     pub agent_bin_dir: String,
+
+    /// Colour variant for the panel-indicator icon. One of `TRAY_ICON_COLORS`.
+    /// Unknown values fall back to `DEFAULT_TRAY_ICON_COLOR` at read time
+    /// (the indicator just substitutes the default rather than refusing to
+    /// render).
+    #[serde(default = "default_tray_icon_color")]
+    pub tray_icon_color: String,
 }
 
 fn home() -> String {
@@ -22,10 +35,15 @@ fn default_agent_bin_dir() -> String {
     format!("{}/.odrive-agent/bin", home())
 }
 
+fn default_tray_icon_color() -> String {
+    DEFAULT_TRAY_ICON_COLOR.to_string()
+}
+
 impl Default for OdriveConfig {
     fn default() -> Self {
         Self {
             agent_bin_dir: default_agent_bin_dir(),
+            tray_icon_color: default_tray_icon_color(),
         }
     }
 }
@@ -101,10 +119,24 @@ mod tests {
         let path = dir.path().join("nested/config.toml");
         let original = OdriveConfig {
             agent_bin_dir: "/opt/odrive/bin".to_string(),
+            tray_icon_color: "white".to_string(),
         };
         original.save_to(&path).expect("save");
         let loaded = OdriveConfig::load_from(&path);
         assert_eq!(loaded.agent_bin_dir, "/opt/odrive/bin");
+        assert_eq!(loaded.tray_icon_color, "white");
+    }
+
+    #[test]
+    fn missing_tray_icon_color_uses_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // Write a file that has only the agent_bin_dir key — exercises the
+        // serde(default) on tray_icon_color so older configs don't break
+        // when this field is added.
+        std::fs::write(&path, "agent_bin_dir = \"/opt/odrive/bin\"\n").unwrap();
+        let cfg = OdriveConfig::load_from(&path);
+        assert_eq!(cfg.tray_icon_color, DEFAULT_TRAY_ICON_COLOR);
     }
 
     #[test]

@@ -253,8 +253,12 @@ fn pick_custom_location(
             ));
             return;
         }
-        // Persist the choice and swap the active agent.
-        if let Err(e) = (OdriveConfig { agent_bin_dir: bin_dir }).save() {
+        // Persist the choice and swap the active agent. Load-modify-save
+        // so we don't clobber other fields (tray_icon_color, etc.) the
+        // user may have set elsewhere.
+        let mut cfg = OdriveConfig::load();
+        cfg.agent_bin_dir = bin_dir;
+        if let Err(e) = cfg.save() {
             overlay.add_toast(Toast::new(&format!("Could not save config: {}", e)));
             return;
         }

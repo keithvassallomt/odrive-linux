@@ -85,9 +85,6 @@ fn present_dashboard(app: &Application) {
     let overlay = ToastOverlay::new();
     overlay.set_child(Some(&nav));
 
-    let dashboard_page = build_dashboard_page(app.clone(), agent.clone(), overlay.clone(), nav.clone());
-    nav.push(&dashboard_page);
-
     let window = ApplicationWindow::builder()
         .application(app)
         .title("odrive Manager")
@@ -99,8 +96,19 @@ fn present_dashboard(app: &Application) {
     // Panel indicator: lives for the lifetime of this dashboard window.
     // If the StatusNotifierItem host isn't available (stock GNOME
     // without the appindicator extension) install() logs a warning
-    // and the Manager runs without a tray icon.
-    indicator::install(app, &window, agent.clone());
+    // and the Manager runs without a tray icon. The returned controller
+    // is shared with the Settings page so the colour combo can swap
+    // the icon live.
+    let tray = Rc::new(indicator::install(app, &window, agent.clone()));
+
+    let dashboard_page = build_dashboard_page(
+        app.clone(),
+        agent.clone(),
+        overlay.clone(),
+        nav.clone(),
+        tray.clone(),
+    );
+    nav.push(&dashboard_page);
 
     // Closing the window via the [X] button only hides it — the tray
     // icon and its "Open odrive Manager" item stay live. The hold
@@ -158,6 +166,7 @@ fn build_dashboard_page(
     agent: Rc<OdriveAgent>,
     overlay: ToastOverlay,
     nav: NavigationView,
+    tray: Rc<indicator::TrayController>,
 ) -> NavigationPage {
     // ToolbarView is the modern shell — it handles background blending
     // and scroll-edge styling between the HeaderBar and the
@@ -172,7 +181,7 @@ fn build_dashboard_page(
     // app-level commands. Houses Preferences and About; future entries
     // (Pause / Resume, Quit on the panel-indicator side) will land here
     // too.
-    let menu = primary_menu(&nav, &agent, &overlay);
+    let menu = primary_menu(&nav, &agent, &overlay, &tray);
     let menu_btn = MenuButton::builder()
         .icon_name("open-menu-symbolic")
         .menu_model(&menu.0)
@@ -508,6 +517,7 @@ fn primary_menu(
     nav: &NavigationView,
     agent: &Rc<OdriveAgent>,
     overlay: &ToastOverlay,
+    tray: &Rc<indicator::TrayController>,
 ) -> (gio::Menu, Vec<(String, Box<dyn Fn() + 'static>)>) {
     let menu = gio::Menu::new();
     let section = gio::Menu::new();
@@ -522,10 +532,11 @@ fn primary_menu(
         let nav = nav.clone();
         let agent = agent.clone();
         let overlay = overlay.clone();
+        let tray = tray.clone();
         actions.push((
             "preferences".to_string(),
             Box::new(move || {
-                let page = settings_page::build(agent.clone(), overlay.clone());
+                let page = settings_page::build(agent.clone(), overlay.clone(), tray.clone());
                 nav.push(&page);
             }),
         ));

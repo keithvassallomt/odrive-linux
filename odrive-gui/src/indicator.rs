@@ -27,11 +27,46 @@ use ksni::blocking::{Handle, TrayMethods};
 use ksni::menu::StandardItem;
 use ksni::{Icon, MenuItem};
 use libadwaita as adw;
-use odrive_core::OdriveAgent;
+use odrive_core::{OdriveAgent, OdriveConfig, DEFAULT_TRAY_ICON_COLOR, TRAY_ICON_COLORS};
 use std::process::Command;
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Duration;
+
+/// Resolve a stored colour string to the icon-theme name we registered
+/// via `install-handlers`. Unknown values fall through to the default
+/// (`pink`) — matches the config-load behaviour and means a typo in
+/// `~/.config/odrive-linux/config.toml` doesn't yield an empty tray.
+fn icon_name_for_color(color: &str) -> String {
+    let resolved = if TRAY_ICON_COLORS.iter().any(|c| *c == color) {
+        color
+    } else {
+        DEFAULT_TRAY_ICON_COLOR
+    };
+    format!("odrive-tray-{}", resolved)
+}
+
+/// Opaque handle returned from `install`. Lets the Settings page swap
+/// the tray icon's colour live without depending on `ksni` types.
+pub struct TrayController {
+    handle: Option<Handle<OdriveTray>>,
+}
+
+impl TrayController {
+    /// Update both `icon_name` and the pre-rendered pixmap to the new
+    /// colour. No-op if the indicator failed to spawn (e.g. no SNI host
+    /// on the bus). Must be called from the GTK main thread because
+    /// `render_pixmap` touches gdk_pixbuf.
+    pub fn set_icon_color(&self, color: &str) {
+        let Some(handle) = &self.handle else { return; };
+        let icon_name = icon_name_for_color(color);
+        let pixmap = render_pixmap(&icon_name, 24);
+        handle.update(move |t: &mut OdriveTray| {
+            t.icon_name_cached = icon_name;
+            t.pixmap = pixmap;
+        });
+    }
+}
 
 /// One-way command from the indicator menu (ksni thread) to the GTK
 /// main thread, where everything that touches GTK or interactive
@@ -56,6 +91,11 @@ pub struct OdriveTray {
     /// SVGs), so we ship raw pixel data the host can blit directly.
     /// Filled at install() time on the GTK main thread.
     pixmap: Vec<Icon>,
+    /// The icon-theme name backing the current pixmap. Stored so the
+    /// Settings page can swap colour live via `Handle::update`. ksni
+    /// calls `icon_name()` on every render, so updating this field is
+    /// enough to pick up the new icon on hosts that do honour names.
+    icon_name_cached: String,
 }
 
 impl ksni::Tray for OdriveTray {
@@ -64,10 +104,7 @@ impl ksni::Tray for OdriveTray {
     }
 
     fn icon_name(&self) -> String {
-        // Adwaita ships this in `symbolic/places/`. Reads
-        // semantically as "remote folder" — what we want for a
-        // cloud-sync manager.
-        "folder-remote-symbolic".into()
+        self.icon_name_cached.clone()
     }
 
     fn icon_pixmap(&self) -> Vec<Icon> {
@@ -192,20 +229,28 @@ fn render_pixmap(name: &str, size: i32) -> Vec<Icon> {
 /// Install the indicator. Spawns the ksni background thread, installs
 /// the GTK-side event drain on the main loop, and starts a 5s
 /// `is_running` poll that mirrors agent state into the tray label.
+/// Returns a `TrayController` the Settings page can hold onto to swap
+/// the icon colour without re-importing `ksni`.
 pub fn install(
     app: &adw::gtk::Application,
     window: &adw::ApplicationWindow,
     agent: Rc<OdriveAgent>,
-) {
+) -> TrayController {
     let (tx, rx) = mpsc::channel::<TrayEvent>();
     let initial_running = agent.is_running();
+    // Read the user's chosen colour from the on-disk config. Unknown
+    // values silently fall back to the default rather than blocking the
+    // indicator from rendering at all.
+    let cfg = OdriveConfig::load();
+    let icon_name = icon_name_for_color(&cfg.tray_icon_color);
     // 24px is the typical GNOME panel size; the host scales as needed.
-    let pixmap = render_pixmap("folder-remote-symbolic", 24);
+    let pixmap = render_pixmap(&icon_name, 24);
 
     let tray = OdriveTray {
         is_running: initial_running,
         tx,
         pixmap,
+        icon_name_cached: icon_name,
     };
 
     // Spawn ksni on its own thread. Returns a handle we use to push
@@ -218,7 +263,7 @@ pub fn install(
                 "Tray indicator unavailable ({e}). On stock GNOME this needs the \
                  gnome-shell-extension-appindicator extension. The Manager works without it."
             );
-            return;
+            return TrayController { handle: None };
         }
     };
 
@@ -251,6 +296,8 @@ pub fn install(
         });
         glib::ControlFlow::Continue
     });
+
+    TrayController { handle: Some(handle) }
 }
 
 fn handle_event(

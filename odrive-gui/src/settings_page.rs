@@ -12,6 +12,7 @@
 //! Long-running operations are not expected here (each setter is a
 //! single CLI invocation that exits immediately) so we run them
 //! synchronously on the GTK main thread.
+use crate::indicator::TrayController;
 use libadwaita as adw;
 use adw::prelude::*;
 use adw::{
@@ -20,12 +21,17 @@ use adw::{
 };
 use adw::gtk::StringList;
 use odrive_core::{
-    AutoUnsyncThreshold, OdriveAgent, PlaceholderThreshold, XlThreshold,
+    AutoUnsyncThreshold, OdriveAgent, OdriveConfig, PlaceholderThreshold, XlThreshold,
+    DEFAULT_TRAY_ICON_COLOR, TRAY_ICON_COLORS,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
 
-pub fn build(agent: Rc<OdriveAgent>, overlay: ToastOverlay) -> NavigationPage {
+pub fn build(
+    agent: Rc<OdriveAgent>,
+    overlay: ToastOverlay,
+    tray: Rc<TrayController>,
+) -> NavigationPage {
     let toolbar = ToolbarView::new();
     toolbar.add_top_bar(&HeaderBar::new());
 
@@ -59,6 +65,23 @@ pub fn build(agent: Rc<OdriveAgent>, overlay: ToastOverlay) -> NavigationPage {
     premium.add(&auto_unsync_row);
     page.add(&premium);
 
+    // ----- Appearance group -----
+    // Tray-icon colour. The icons are installed by `odrive-cli
+    // install-handlers` into hicolor's `status` category as
+    // `odrive-tray-<color>`. Selection persists to
+    // ~/.config/odrive-linux/config.toml; the change applies live to
+    // the running indicator via TrayController and is picked up at the
+    // next process start when the GUI launches without an active tray.
+    let appearance = PreferencesGroup::builder()
+        .title("Appearance")
+        .description("How the panel indicator renders.")
+        .build();
+
+    let cfg = OdriveConfig::load();
+    let tray_row = build_tray_color_row(&cfg.tray_icon_color);
+    appearance.add(&tray_row);
+    page.add(&appearance);
+
     toolbar.set_content(Some(&page));
 
     // Re-entrancy guard: applying a value may cause us to revert the
@@ -70,6 +93,7 @@ pub fn build(agent: Rc<OdriveAgent>, overlay: ToastOverlay) -> NavigationPage {
     wire_placeholder(&placeholder_row, agent.clone(), overlay.clone(), suppress.clone());
     wire_xl(&xl_row, agent.clone(), overlay.clone(), suppress.clone());
     wire_auto_unsync(&auto_unsync_row, agent.clone(), overlay.clone(), suppress.clone());
+    wire_tray_color(&tray_row, overlay.clone(), tray.clone());
 
     NavigationPage::builder()
         .title("Preferences")
@@ -124,6 +148,30 @@ fn build_xl_row(initial: XlThreshold) -> ComboRow {
         .model(&StringList::new(XL_LABELS))
         .build();
     row.set_selected(index_of(XL_VARIANTS, initial) as u32);
+    row
+}
+
+/// User-facing labels for the tray colour combo. The order must mirror
+/// `odrive_core::TRAY_ICON_COLORS` exactly — selection index is the
+/// canonical mapping back to a colour name on save.
+const TRAY_COLOR_LABELS: &[&str] = &["Pink", "White", "Black", "Dark grey", "Grey"];
+
+fn build_tray_color_row(initial: &str) -> ComboRow {
+    let row = ComboRow::builder()
+        .title("Tray icon colour")
+        .subtitle("Pick the panel-indicator variant that suits your theme")
+        .model(&StringList::new(TRAY_COLOR_LABELS))
+        .build();
+    let idx = TRAY_ICON_COLORS
+        .iter()
+        .position(|c| *c == initial)
+        .unwrap_or_else(|| {
+            TRAY_ICON_COLORS
+                .iter()
+                .position(|c| *c == DEFAULT_TRAY_ICON_COLOR)
+                .unwrap_or(0)
+        });
+    row.set_selected(idx as u32);
     row
 }
 
@@ -213,6 +261,30 @@ fn wire_auto_unsync(
                 revert_to_agent_state(&row_clone, &agent, &suppress, GlobalSelector::AutoUnsync);
             }
         }
+    });
+}
+
+/// Persist the tray-colour selection and push it to the running
+/// indicator. No agent setter is involved — this is a pure local
+/// preference. On config-save failure we surface a toast and leave the
+/// row at the new selection (the icon already updated, and re-opening
+/// Settings will reflect whatever's actually on disk).
+fn wire_tray_color(
+    row: &ComboRow,
+    overlay: ToastOverlay,
+    tray: Rc<TrayController>,
+) {
+    row.connect_selected_notify(move |r| {
+        let idx = r.selected() as usize;
+        let Some(color) = TRAY_ICON_COLORS.get(idx).copied() else {
+            return;
+        };
+        let mut cfg = OdriveConfig::load();
+        cfg.tray_icon_color = color.to_string();
+        if let Err(e) = cfg.save() {
+            overlay.add_toast(Toast::new(&format!("Could not save preference: {}", e)));
+        }
+        tray.set_icon_color(color);
     });
 }
 

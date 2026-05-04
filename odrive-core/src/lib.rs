@@ -1,6 +1,6 @@
 mod config;
 mod db;
-pub use config::OdriveConfig;
+pub use config::{OdriveConfig, DEFAULT_TRAY_ICON_COLOR, TRAY_ICON_COLORS};
 pub use db::{FolderRule, OdriveDb};
 
 use std::process::{Command, Stdio};

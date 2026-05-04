@@ -238,6 +238,16 @@ const EMBLEMS: &[(&str, &str)] = &[
     ("locked",  "odrive-locked"),
 ];
 
+/// Tray-icon colour variants. Each entry: (colour name, target icon stem
+/// installed under hicolor/<size>/status/). The colour name is what
+/// `OdriveConfig::tray_icon_color` stores; the target stem is what the
+/// indicator passes to `IconTheme::lookup_icon`. The asset bundle is
+/// asymmetric: pink and darkgrey ship a per-colour subdirectory with
+/// 256/512/1024 sized PNGs, while black/grey/white only ship a single
+/// large master at the top of `tray-icons/static/`. `install_tray_icon`
+/// handles both layouts.
+const TRAY_COLORS: &[&str] = &["pink", "white", "black", "darkgrey", "grey"];
+
 fn xdg_data_home() -> String {
     std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| {
         let home = std::env::var("HOME").expect("$HOME must be set");
@@ -301,6 +311,105 @@ fn install_icon_set(
         count += 1;
     }
     Ok(count)
+}
+
+/// Install the tray-icon variants for one colour. Tries the per-colour
+/// subdirectory first (`tray-icons/static/infinity-<color>/` with sized
+/// PNGs); if that's empty/missing, falls back to the single root master
+/// (`tray-icons/static/infinity-<color>.png`).
+///
+/// Returns the count of files copied.
+///
+/// **Why we also write to `48x48/status/`:** SNI hosts on GNOME (notably
+/// the `status-tray` extension and the older `appindicator` one) walk a
+/// hardcoded list of panel-relevant size buckets — `48x48`, `32x32`,
+/// `24x24`, `22x22`, `16x16` — when looking up an `IconName` against the
+/// icon theme. They never check `256x256+/`. If we only deposit the
+/// hi-res masters (which is what the source bundle ships) the panel
+/// finds nothing and the icon goes blank, even though the GTK icon-theme
+/// cache indexes our name correctly. Copying the smallest-available
+/// source into `48x48/status/<name>.png` puts at least one file inside
+/// the host's search list. The dimensions don't have to match — both
+/// `gtk-update-icon-cache` and St.Icon load by file path and scale at
+/// render time — so a 256-px PNG sitting under `48x48/` is a valid
+/// "best available" shim.
+fn install_tray_icon(
+    icons_dir: &std::path::Path,
+    hicolor: &str,
+    color: &str,
+) -> std::io::Result<usize> {
+    let target = format!("odrive-tray-{}", color);
+    let mut count = 0usize;
+
+    let subdir = icons_dir
+        .join("tray-icons")
+        .join("static")
+        .join(format!("infinity-{}", color));
+    if subdir.is_dir() {
+        count += install_icon_set(&subdir, hicolor, "status", &target)?;
+    }
+
+    let master = icons_dir
+        .join("tray-icons")
+        .join("static")
+        .join(format!("infinity-{}.png", color));
+    if count == 0 && master.is_file() {
+        // No per-size subdir — drop the master at the largest sensible
+        // bucket so high-DPI panels and "show on the bus" tooling pick
+        // it up.
+        let dst_dir = format!("{}/256x256/status", hicolor);
+        std::fs::create_dir_all(&dst_dir)?;
+        let dst = format!("{}/{}.png", dst_dir, target);
+        std::fs::copy(&master, &dst)?;
+        count += 1;
+    }
+
+    // Always also write a copy under 48x48/status/. Pick the smallest
+    // available source file to minimise download size during decode.
+    if let Some(panel_src) = panel_source_for(&subdir, &master) {
+        let dst_dir = format!("{}/48x48/status", hicolor);
+        std::fs::create_dir_all(&dst_dir)?;
+        let dst = format!("{}/{}.png", dst_dir, target);
+        std::fs::copy(&panel_src, &dst)?;
+        count += 1;
+    }
+
+    Ok(count)
+}
+
+/// Return the smallest source PNG suitable as a panel-size shim. Prefer
+/// the 256-px file inside the per-colour subdirectory; otherwise the
+/// root master. Returns `None` when neither exists (caller's
+/// `install_tray_icon` already returned 0 in that case).
+fn panel_source_for(subdir: &std::path::Path, master: &std::path::Path) -> Option<std::path::PathBuf> {
+    if subdir.is_dir() {
+        let mut smallest: Option<(u32, std::path::PathBuf)> = None;
+        if let Ok(entries) = std::fs::read_dir(subdir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().and_then(|s| s.to_str()) != Some("png") {
+                    continue;
+                }
+                let stem = match p.file_stem().and_then(|s| s.to_str()) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                let Some(size) = parse_icon_size(stem) else { continue };
+                match &smallest {
+                    None => smallest = Some((size, p)),
+                    Some((s, _)) if size < *s => smallest = Some((size, p)),
+                    _ => {}
+                }
+            }
+        }
+        if let Some((_, p)) = smallest {
+            return Some(p);
+        }
+    }
+    if master.is_file() {
+        return Some(master.to_path_buf());
+    }
+    None
 }
 
 fn build_mime_xml() -> String {
@@ -386,6 +495,9 @@ fn install_handlers() -> Result<(), Box<dyn std::error::Error>> {
                 &target,
             )?;
         }
+        for color in TRAY_COLORS {
+            icon_files += install_tray_icon(&icons_dir, &hicolor, color)?;
+        }
         let _ = std::process::Command::new("gtk-update-icon-cache")
             .args(["-f", "-t"])
             .arg(&hicolor)
@@ -437,18 +549,29 @@ fn uninstall_handlers() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Sweep our installed icons. We only delete files we wrote; other
-    // emblems/mimetypes in hicolor are untouched.
-    let mut icon_targets: Vec<String> = EMBLEMS.iter().map(|(_, n)| (*n).to_string()).collect();
-    icon_targets.extend(CLOUD_TYPES.iter().map(|(_, stem, _)| format!("odrive-{}-cloud", stem)));
+    // emblems/mimetypes/status icons in hicolor are untouched.
+    let emblem_targets: Vec<String> = EMBLEMS.iter().map(|(_, n)| (*n).to_string()).collect();
+    let mime_targets: Vec<String> = CLOUD_TYPES
+        .iter()
+        .map(|(_, stem, _)| format!("odrive-{}-cloud", stem))
+        .collect();
+    let status_targets: Vec<String> = TRAY_COLORS
+        .iter()
+        .map(|c| format!("odrive-tray-{}", c))
+        .collect();
     let mut removed_icons = 0usize;
     if let Ok(entries) = std::fs::read_dir(&hicolor) {
         for size_dir in entries.flatten() {
-            for category in &["emblems", "mimetypes"] {
+            for (category, names) in [
+                ("emblems", &emblem_targets),
+                ("mimetypes", &mime_targets),
+                ("status", &status_targets),
+            ] {
                 let cat_dir = size_dir.path().join(category);
                 if !cat_dir.is_dir() {
                     continue;
                 }
-                for name in &icon_targets {
+                for name in names {
                     let p = cat_dir.join(format!("{}.png", name));
                     if p.exists() {
                         let _ = std::fs::remove_file(&p);
