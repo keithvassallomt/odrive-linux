@@ -1,7 +1,7 @@
 mod config;
 mod db;
 pub use config::OdriveConfig;
-pub use db::OdriveDb;
+pub use db::{FolderRule, OdriveDb};
 
 use std::process::{Command, Stdio};
 use serde::{Deserialize, Serialize};
@@ -213,6 +213,54 @@ impl AutoUnsyncThreshold {
             "week" => Some(AutoUnsyncThreshold::Week),
             "month" => Some(AutoUnsyncThreshold::Month),
             _ => None,
+        }
+    }
+}
+
+/// Per-folder sync threshold. `odrive foldersyncrule <path> <threshold>`
+/// accepts the literal `0` to disable auto-download, the literal `inf`
+/// to download everything regardless of size, or any positive integer
+/// MB. Modelling those three cases at the type level keeps the call
+/// sites unambiguous and makes `0` (= never) a deliberate choice rather
+/// than a sentinel collision with "default".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FolderSyncThreshold {
+    /// No auto-download for this folder. Encoded as the CLI literal `0`.
+    None,
+    /// Auto-download files at or below this size in MB.
+    Mb(u32),
+    /// Auto-download all files. Encoded as the CLI literal `inf`.
+    Inf,
+}
+
+impl FolderSyncThreshold {
+    pub fn to_cli_arg(self) -> String {
+        match self {
+            FolderSyncThreshold::None => "0".to_string(),
+            FolderSyncThreshold::Mb(n) => n.to_string(),
+            FolderSyncThreshold::Inf => "inf".to_string(),
+        }
+    }
+
+    /// Encode as a single i32 for the SQLite `threshold_mb` column.
+    /// `0` → `None`, `-1` → `Inf`, anything else is the MB value
+    /// directly. Negative MB is a programming error elsewhere; we
+    /// don't validate the range here.
+    pub fn to_db_value(self) -> i32 {
+        match self {
+            FolderSyncThreshold::None => 0,
+            FolderSyncThreshold::Inf => -1,
+            FolderSyncThreshold::Mb(n) => n as i32,
+        }
+    }
+
+    /// Inverse of `to_db_value`. Out-of-range values fall back to `None`.
+    pub fn from_db_value(v: i32) -> Self {
+        match v {
+            0 => FolderSyncThreshold::None,
+            -1 => FolderSyncThreshold::Inf,
+            n if n > 0 => FolderSyncThreshold::Mb(n as u32),
+            _ => FolderSyncThreshold::None,
         }
     }
 }
@@ -565,6 +613,53 @@ curl -fL "https://dl.odrive.com/odrivecli-lnx-64" | tar -xzf- -C "$od/"
             .arg("sync")
             .arg(path)
             .output()?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            Err(OdriveError::CliError(String::from_utf8_lossy(&output.stderr).to_string()))
+        }
+    }
+
+    /// Wrapper for `odrive sync <path> --recursive [--nodownload]`. The
+    /// `no_download` flag is the lazy-expansion path used by the mount
+    /// detail page on first open: it materialises every placeholder
+    /// (creates real directories from `.cloudf`s) without pulling file
+    /// contents. Without `--nodownload` it's the explicit "Sync now"
+    /// for a one-time per-folder operation.
+    pub fn sync_recursive(&self, path: &str, no_download: bool) -> Result<String, OdriveError> {
+        let mut cmd = Command::new(&self.bin_path);
+        cmd.arg("sync").arg(path).arg("--recursive");
+        if no_download {
+            cmd.arg("--nodownload");
+        }
+        let output = cmd.output()?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            Err(OdriveError::CliError(String::from_utf8_lossy(&output.stderr).to_string()))
+        }
+    }
+
+    /// Wrapper for `odrive foldersyncrule [--expandsubfolders] <path>
+    /// <threshold>`. The agent has no LIST or REMOVE for these rules
+    /// — to "delete" one we set the threshold to `0` (never
+    /// auto-download for this folder) and drop our own SQLite tracking
+    /// row. See `OdriveDb::delete_folder_rule` for that side.
+    pub fn folder_sync_rule(
+        &self,
+        path: &str,
+        threshold: FolderSyncThreshold,
+        expand_subfolders: bool,
+    ) -> Result<String, OdriveError> {
+        let mut cmd = Command::new(&self.bin_path);
+        cmd.arg("foldersyncrule");
+        if expand_subfolders {
+            cmd.arg("--expandsubfolders");
+        }
+        cmd.arg(path).arg(threshold.to_cli_arg());
+        let output = cmd.output()?;
 
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -940,6 +1035,38 @@ xlThreshold: medium
         assert_eq!(
             XlThreshold::from_status_token("extraLarge"),
             Some(XlThreshold::Xlarge)
+        );
+    }
+
+    #[test]
+    fn folder_sync_threshold_cli_round_trip() {
+        // `0` and `inf` are explicit at the CLI; the literal MB value
+        // is just the integer.
+        assert_eq!(FolderSyncThreshold::None.to_cli_arg(), "0");
+        assert_eq!(FolderSyncThreshold::Inf.to_cli_arg(), "inf");
+        assert_eq!(FolderSyncThreshold::Mb(100).to_cli_arg(), "100");
+        assert_eq!(FolderSyncThreshold::Mb(0).to_cli_arg(), "0");
+    }
+
+    #[test]
+    fn folder_sync_threshold_db_round_trip() {
+        // The DB column uses an i32 with `0`/`-1` sentinels.
+        for v in [
+            FolderSyncThreshold::None,
+            FolderSyncThreshold::Inf,
+            FolderSyncThreshold::Mb(1),
+            FolderSyncThreshold::Mb(100),
+            FolderSyncThreshold::Mb(500),
+            FolderSyncThreshold::Mb(123_456),
+        ] {
+            let encoded = v.to_db_value();
+            let decoded = FolderSyncThreshold::from_db_value(encoded);
+            assert_eq!(decoded, v, "round-trip for {:?} via {}", v, encoded);
+        }
+        // Out-of-range negatives degrade to None rather than panic.
+        assert_eq!(
+            FolderSyncThreshold::from_db_value(-2),
+            FolderSyncThreshold::None
         );
     }
 
