@@ -1,4 +1,6 @@
+mod config;
 mod db;
+pub use config::OdriveConfig;
 pub use db::OdriveDb;
 
 use std::process::{Command, Stdio};
@@ -6,6 +8,37 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use std::path::Path;
 use std::fs;
+
+/// True iff the human-readable `odrive status` text reports both an
+/// activated account and an active session. Pulled out as a free function
+/// so it's testable without spawning the agent.
+fn is_authenticated_marker(status_text: &str) -> bool {
+    status_text.contains("isActivated: True") && status_text.contains("hasSession: True")
+}
+
+/// Build the systemd user unit text targeted at a specific `odriveagent`
+/// path. The body is the verbatim unit we already use, with only the
+/// `ExecStart` line substituted so a wizard-discovered custom location
+/// is honored.
+fn render_systemd_unit(agent_path: &str) -> String {
+    format!(
+        "# Managed by odrive-linux. Edit at your own risk.
+[Unit]
+Description=Run odrive-agent as a user service
+Wants=network-online.target
+After=network.target network-online.target
+
+[Service]
+Type=simple
+ExecStart={agent_path}
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+"
+    )
+}
 
 /// Parse the stdout of `odrive status --mounts`. The agent prints two lines
 /// per mount: a local-path line and a remote-path line, each suffixed with
@@ -77,6 +110,7 @@ pub struct OdriveMount {
 pub struct OdriveAgent {
     bin_path: String,
     agent_path: String,
+    agent_bin_dir: String,
     home: String,
 }
 
@@ -87,11 +121,35 @@ impl OdriveAgent {
         // broken and we'd rather fail loudly than silently pick a wrong
         // directory.
         let home = std::env::var("HOME").expect("HOME environment variable must be set");
+        let cfg = OdriveConfig::load();
+        Self::with_bin_dir(home, cfg.agent_bin_dir)
+    }
+
+    /// Construct an agent rooted at an explicit bin directory. Used by the
+    /// onboarding wizard's "specify custom location" branch and by tests
+    /// that want to bypass the on-disk config.
+    pub fn with_bin_dir(home: String, agent_bin_dir: String) -> Self {
         Self {
-            bin_path: format!("{}/.odrive-agent/bin/odrive", home),
-            agent_path: format!("{}/.odrive-agent/bin/odriveagent", home),
+            bin_path: format!("{}/odrive", agent_bin_dir),
+            agent_path: format!("{}/odriveagent", agent_bin_dir),
+            agent_bin_dir,
             home,
         }
+    }
+
+    /// Return a new `OdriveAgent` with the same `$HOME` but a different
+    /// agent bin directory. The wizard uses this after the user picks a
+    /// custom install location, before saving it to the config file.
+    pub fn with_new_bin_dir(&self, new_bin_dir: String) -> Self {
+        Self::with_bin_dir(self.home.clone(), new_bin_dir)
+    }
+
+    pub fn agent_bin_dir(&self) -> &str {
+        &self.agent_bin_dir
+    }
+
+    pub fn home(&self) -> &str {
+        &self.home
     }
 
     /// Conventional default mount path (`~/odrive`) — used by CLI/GUI as
@@ -195,6 +253,103 @@ impl OdriveAgent {
         Ok(())
     }
 
+    /// Run the official odrive install pipeline into `self.agent_bin_dir`.
+    /// We shell out to bash to use the same curl+tar steps the upstream
+    /// publishes; doing the equivalent natively in Rust would pull in
+    /// reqwest+tar+flate2 just to replicate four lines of shell.
+    /// On completion verifies both `odrive` and `odriveagent` exist.
+    pub fn install_official(&self) -> Result<(), OdriveError> {
+        let script = format!(
+            r#"set -eo pipefail
+od="{dir}"
+mkdir -p "$od"
+curl -fL "https://dl.odrive.com/odrive-py" --create-dirs -o "$od/odrive.py"
+curl -fL "https://dl.odrive.com/odriveagent-lnx-64" | tar -xzf- -C "$od/"
+curl -fL "https://dl.odrive.com/odrivecli-lnx-64" | tar -xzf- -C "$od/"
+"#,
+            dir = self.agent_bin_dir,
+        );
+        let status = Command::new("bash").arg("-c").arg(&script).status()?;
+        if !status.success() {
+            return Err(OdriveError::CliError(format!(
+                "official install pipeline exited {}",
+                status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".to_string())
+            )));
+        }
+        if !Path::new(&self.bin_path).exists() {
+            return Err(OdriveError::CliError(format!(
+                "install completed but {} is missing",
+                self.bin_path
+            )));
+        }
+        if !Path::new(&self.agent_path).exists() {
+            return Err(OdriveError::CliError(format!(
+                "install completed but {} is missing",
+                self.agent_path
+            )));
+        }
+        Ok(())
+    }
+
+    /// Write a systemd user unit pointing at this agent's binary path.
+    /// Replaces any existing unit at the same path. The wizard then calls
+    /// `enable_systemd_unit()` to load + start it.
+    pub fn write_systemd_unit(&self) -> Result<(), OdriveError> {
+        let body = render_systemd_unit(&self.agent_path);
+        let path = format!("{}/.config/systemd/user/odrive.service", self.home);
+        if let Some(parent) = Path::new(&path).parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&path, body)?;
+        Ok(())
+    }
+
+    /// `systemctl --user daemon-reload && systemctl --user enable --now
+    /// odrive.service`. daemon-reload is necessary for fresh unit files;
+    /// `enable --now` both enables auto-start at login and starts the
+    /// service immediately.
+    pub fn enable_systemd_unit(&self) -> Result<(), OdriveError> {
+        let reload = Command::new("systemctl")
+            .arg("--user")
+            .arg("daemon-reload")
+            .status()?;
+        if !reload.success() {
+            return Err(OdriveError::Systemd("daemon-reload failed".to_string()));
+        }
+        let enable = Command::new("systemctl")
+            .arg("--user")
+            .arg("enable")
+            .arg("--now")
+            .arg("odrive.service")
+            .status()?;
+        if !enable.success() {
+            return Err(OdriveError::Systemd("enable --now odrive.service failed".to_string()));
+        }
+        Ok(())
+    }
+
+    /// `loginctl enable-linger <user>`. Lets the user-level service stay
+    /// up after logout and start at boot. Requires polkit/sudo at the OS
+    /// level the first time; if that prompt isn't available the call may
+    /// fail — surface the error rather than silently swallowing it.
+    pub fn enable_linger(&self) -> Result<(), OdriveError> {
+        let user = std::env::var("USER")
+            .or_else(|_| std::env::var("LOGNAME"))
+            .map_err(|_| OdriveError::CliError("USER/LOGNAME not set; cannot enable linger".to_string()))?;
+        let status = Command::new("loginctl")
+            .arg("enable-linger")
+            .arg(&user)
+            .status()?;
+        if !status.success() {
+            return Err(OdriveError::Systemd(format!(
+                "loginctl enable-linger {} failed (exit {})",
+                user,
+                status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".to_string())
+            )));
+        }
+        Ok(())
+    }
+
     pub fn get_status(&self) -> Result<OdriveStatus, OdriveError> {
         if !self.binary_exists() {
             return Ok(OdriveStatus {
@@ -211,6 +366,18 @@ impl OdriveAgent {
         Ok(OdriveStatus {
             is_running: process_alive && output.status.success(),
             sync_status: String::from_utf8_lossy(&output.stdout).to_string(),
+        })
+    }
+
+    /// True iff the agent reports both `isActivated: True` and
+    /// `hasSession: True` in its status output. Reuses the same `odrive
+    /// status` call as `get_status`/`is_running` — the upstream prints
+    /// these markers in the human-readable status text. If the binary
+    /// isn't there or the call fails, treat the user as unauthenticated.
+    pub fn is_authenticated(&self) -> bool {
+        is_authenticated_marker(&match self.get_status() {
+            Ok(s) => s.sync_status,
+            Err(_) => return false,
         })
     }
 
@@ -244,6 +411,39 @@ impl OdriveAgent {
         let output = Command::new(&self.bin_path)
             .arg("refresh")
             .arg(path)
+            .output()?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            Err(OdriveError::CliError(String::from_utf8_lossy(&output.stderr).to_string()))
+        }
+    }
+
+    /// Wrapper for `odrive authenticate <auth_key>`. Used by the wizard's
+    /// Login page after the user pastes their key from
+    /// https://www.odrive.com/account/authcodes.
+    pub fn authenticate(&self, auth_key: &str) -> Result<String, OdriveError> {
+        let output = Command::new(&self.bin_path)
+            .arg("authenticate")
+            .arg(auth_key)
+            .output()?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            Err(OdriveError::CliError(String::from_utf8_lossy(&output.stderr).to_string()))
+        }
+    }
+
+    /// Wrapper for `odrive mount <local> <remote>`. Used by the wizard's
+    /// optional Mount page and any future post-wizard CTA. Local path is
+    /// expected to be absolute; the upstream creates it if it doesn't exist.
+    pub fn mount(&self, local: &str, remote: &str) -> Result<String, OdriveError> {
+        let output = Command::new(&self.bin_path)
+            .arg("mount")
+            .arg(local)
+            .arg(remote)
             .output()?;
 
         if output.status.success() {
@@ -363,6 +563,35 @@ mod tests {
     fn parse_mounts_empty_input() {
         assert!(parse_mounts("").is_empty());
         assert!(parse_mounts("\n\n").is_empty());
+    }
+
+    #[test]
+    fn is_authenticated_marker_requires_both_true_markers() {
+        // Real-shape excerpt from `odrive status` on this box.
+        let activated = "isActivated: True                                               hasSession: True\nemail: keithv@me.com";
+        assert!(is_authenticated_marker(activated));
+
+        // Either marker absent or false → not authenticated.
+        assert!(!is_authenticated_marker("isActivated: True\nhasSession: False"));
+        assert!(!is_authenticated_marker("isActivated: False\nhasSession: True"));
+        assert!(!is_authenticated_marker("isActivated: True"));
+        assert!(!is_authenticated_marker("hasSession: True"));
+        assert!(!is_authenticated_marker(""));
+    }
+
+    #[test]
+    fn render_systemd_unit_substitutes_exec_start() {
+        let unit = render_systemd_unit("/opt/odrive/bin/odriveagent");
+        assert!(unit.contains("ExecStart=/opt/odrive/bin/odriveagent\n"));
+        // Skeleton bits we rely on for systemd to accept the unit:
+        assert!(unit.contains("[Unit]"));
+        assert!(unit.contains("[Service]"));
+        assert!(unit.contains("Type=simple"));
+        assert!(unit.contains("Restart=on-failure"));
+        assert!(unit.contains("[Install]"));
+        assert!(unit.contains("WantedBy=default.target"));
+        // No leftover `%h` placeholder from the upstream-template version.
+        assert!(!unit.contains("%h"));
     }
 }
 
