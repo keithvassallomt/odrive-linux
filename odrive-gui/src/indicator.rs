@@ -64,16 +64,10 @@ impl ksni::Tray for OdriveTray {
     }
 
     fn icon_name(&self) -> String {
-        // Symbolic, and deliberately from the `devices/` category:
-        // some SNI hosts (notably the keithvassallo `status-tray`
-        // GNOME extension we test against) only resolve icon names
-        // whose theme file lives in apps/status/legacy/devices/actions.
-        // `folder-remote-symbolic` lives in `places/` and falls
-        // through to a panel-rendering path that doesn't render at
-        // all on that host. `drive-multidisk-symbolic` lives in
-        // `devices/` (resolves via the Gio.FileIcon path) and reads
-        // visually as cloud storage.
-        "drive-multidisk-symbolic".into()
+        // Adwaita ships this in `symbolic/places/`. Reads
+        // semantically as "remote folder" — what we want for a
+        // cloud-sync manager.
+        "folder-remote-symbolic".into()
     }
 
     fn icon_pixmap(&self) -> Vec<Icon> {
@@ -206,7 +200,7 @@ pub fn install(
     let (tx, rx) = mpsc::channel::<TrayEvent>();
     let initial_running = agent.is_running();
     // 24px is the typical GNOME panel size; the host scales as needed.
-    let pixmap = render_pixmap("drive-multidisk-symbolic", 24);
+    let pixmap = render_pixmap("folder-remote-symbolic", 24);
 
     let tray = OdriveTray {
         is_running: initial_running,
