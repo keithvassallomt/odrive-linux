@@ -127,19 +127,22 @@ class OdriveExtension(GObject.GObject, Nautilus.MenuProvider, Nautilus.InfoProvi
         for path in paths:
             subprocess.run([self.cli_path, 'unsync', path], check=False)
 
-    # InfoProvider — paint a "remote-only" badge on `.cloud` /
-    # `.cloudf` placeholders. Materialised files get no emblem
-    # (synced is the default state and badging every regular file in
-    # `~/odrive` would just be noise). A future syncing emblem on
-    # parent folders during in-flight `odrive sync` is tracked
-    # separately and will read in-progress state from the workspace
-    # SQLite DB.
+    # InfoProvider — applies emblems and pads placeholders on the fly.
     #
-    # `emblem-downloads` is a pragmatic choice: Yaru (Ubuntu default)
-    # ships it and Nautilus falls back to the active GTK theme so it
-    # works on most distros; the semantic is "downloadable" rather
-    # than "in the Downloads folder", close enough for V1. Swap to a
-    # bundled `emblem-odrive-cloud-symbolic` if/when we package one.
+    # Decoration model (matches macOS/Windows odrive):
+    # - `.cloud`/`.cloudf` placeholders: NO emblem. The cloud-file-type
+    #   icon registered for known extensions (gdoc/gsheet/...) already
+    #   conveys "remote", and unknown placeholders fall back to the
+    #   generic file icon. Adding an emblem here would be redundant.
+    # - Materialized items inside any known mount: `odrive-synced`
+    #   emblem (a vendor-prefixed icon installed by
+    #   `odrive-cli install-handlers` into the hicolor theme).
+    # - Mount root itself: no emblem (would clutter ~/odrive's row).
+    # - A future syncing emblem on parent folders during in-flight
+    #   `odrive sync` is tracked separately; the design reads
+    #   in-progress state from a sync_in_progress table in
+    #   ~/.odrive-linux.db so both the GUI and Nautilus see the same
+    #   set without D-Bus glue.
     #
     # We also opportunistically pad zero-byte placeholders to one byte
     # so GLib's `application/x-zerosize` hardcoding stops blocking
@@ -150,9 +153,17 @@ class OdriveExtension(GObject.GObject, Nautilus.MenuProvider, Nautilus.InfoProvi
     # `odrive-cli scan`.
     def update_file_info(self, file):
         name = file.get_name()
+        path = file.get_location().get_path()
+        if path is None:
+            return Nautilus.OperationResult.COMPLETE
+
         if name.endswith('.cloud') or name.endswith('.cloudf'):
-            file.add_emblem('emblem-downloads')
             self._maybe_pad_placeholder(file)
+        else:
+            in_mount = any(path.startswith(m) for m in self.mounts)
+            is_mount_root = path in self.mounts
+            if in_mount and not is_mount_root:
+                file.add_emblem('odrive-synced')
         return Nautilus.OperationResult.COMPLETE
 
     def _maybe_pad_placeholder(self, file):
