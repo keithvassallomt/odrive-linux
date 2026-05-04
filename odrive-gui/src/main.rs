@@ -1,3 +1,4 @@
+mod mount_detail;
 mod settings_page;
 mod wizard;
 
@@ -214,6 +215,7 @@ fn build_dashboard_page(
         let mounts_group = mounts_group.clone();
         let overlay = overlay.clone();
         let mounted_children = mounted_children.clone();
+        let nav_for_rows = nav.clone();
         move || {
             let is_running = agent.is_running();
             status_row.set_subtitle(if is_running { "Running" } else { "Stopped" });
@@ -250,6 +252,7 @@ fn build_dashboard_page(
                         let row = build_mount_row(
                             agent.clone(),
                             overlay.clone(),
+                            nav_for_rows.clone(),
                             mount.local_path.clone(),
                             mount.remote_path.clone(),
                             mount.status.clone(),
@@ -327,12 +330,13 @@ fn build_dashboard_page(
         .build()
 }
 
-/// Build a single mount entry. Phase 2 will hook the row's `activated`
-/// signal to push a mount-detail page; for now activation is a no-op
-/// (the chevron is purely a visual affordance for the upcoming flow).
+/// Build a single mount entry. The row is `activatable` and on click
+/// pushes the mount-detail page onto the same NavigationView, where
+/// the user can drill into folders and set per-folder sync rules.
 fn build_mount_row(
     agent: Rc<OdriveAgent>,
     overlay: ToastOverlay,
+    nav: NavigationView,
     local_path: String,
     remote_path: String,
     status: String,
@@ -349,6 +353,12 @@ fn build_mount_row(
     let icon = adw::gtk::Image::from_icon_name("folder-symbolic");
     icon.set_pixel_size(24);
     row.add_prefix(&icon);
+
+    // Trailing chevron — visual cue that the row drills into a detail
+    // page. Sits before the unmount button so the destructive icon is
+    // closer to the row edge.
+    let chevron = adw::gtk::Image::from_icon_name("go-next-symbolic");
+    row.add_suffix(&chevron);
 
     let unmount_btn = Button::builder()
         .icon_name("user-trash-symbolic")
@@ -371,6 +381,22 @@ fn build_mount_row(
         });
     }
     row.add_suffix(&unmount_btn);
+
+    {
+        let agent = agent.clone();
+        let overlay = overlay.clone();
+        let nav = nav.clone();
+        let local_path = local_path.clone();
+        row.connect_activated(move |_| {
+            let page = mount_detail::build_mount_root(
+                agent.clone(),
+                overlay.clone(),
+                nav.clone(),
+                local_path.clone(),
+            );
+            nav.push(&page);
+        });
+    }
 
     row
 }
