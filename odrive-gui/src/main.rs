@@ -6,10 +6,12 @@ use adw::prelude::*;
 use adw::gtk as gtk;
 use adw::{
     ActionRow, ApplicationWindow, HeaderBar, MessageDialog, NavigationPage,
-    NavigationView, ResponseAppearance, Toast, ToastOverlay,
+    NavigationView, PreferencesGroup, PreferencesPage, ResponseAppearance,
+    StatusPage, Toast, ToastOverlay, ToolbarView, WindowTitle,
 };
-use gtk::{Application, Box, ListBox, Orientation, Button, Label};
+use gtk::{gdk, gio, Application, Button, CssProvider, MenuButton};
 use odrive_core::{OdriveAgent, OdriveDb};
+use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
@@ -17,6 +19,10 @@ fn main() {
     let application = Application::builder()
         .application_id("ai.openclaw.odrive-linux")
         .build();
+
+    application.connect_startup(|_| {
+        install_app_css();
+    });
 
     application.connect_activate(|app| {
         let agent = OdriveAgent::new();
@@ -65,174 +71,207 @@ fn present_dashboard(app: &Application) {
     let overlay = ToastOverlay::new();
     overlay.set_child(Some(&nav));
 
-    let dashboard_page = build_dashboard_page(agent.clone(), overlay.clone(), nav.clone());
+    let dashboard_page = build_dashboard_page(app.clone(), agent.clone(), overlay.clone(), nav.clone());
     nav.push(&dashboard_page);
 
     let window = ApplicationWindow::builder()
         .application(app)
         .title("odrive Manager")
-        .default_width(640)
-        .default_height(480)
+        .default_width(820)
+        .default_height(520)
         .content(&overlay)
         .build();
 
     window.present();
 }
 
+/// App-wide CSS overrides. We only make the smallest set of tweaks
+/// libadwaita doesn't already do for us:
+///   - Dim group descriptions and row subtitles so titles win the
+///     visual weight contest (Yaru's defaults render both in the same
+///     bright white).
+///   - Add real space between PreferencesGroups and a touch of vertical
+///     padding inside each row so the content feels less crammed at
+///     density-1.
+fn install_app_css() {
+    let css = CssProvider::new();
+    // Class-based selectors that don't depend on libadwaita's exact
+    // widget-tree depth. `.description` is the class libadwaita applies
+    // to the group description label; `.subtitle` is on row subtitles.
+    // (My earlier `preferencesgroup > box > label.description` selector
+    // was one level too shallow — the description sits inside a nested
+    // header box, not directly under the outer vertical box.)
+    css.load_from_string(
+        "preferencesgroup .description { opacity: 0.55; }\n\
+         row .subtitle { opacity: 0.6; }\n\
+         preferencesgroup { margin-bottom: 18px; }\n\
+         preferencesgroup .boxed-list { margin-top: 12px; }\n\
+         preferencespage > scrolledwindow > viewport > clamp { margin-top: 6px; }\n",
+    );
+    if let Some(display) = gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &css,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+}
+
 fn build_dashboard_page(
+    app: Application,
     agent: Rc<OdriveAgent>,
     overlay: ToastOverlay,
     nav: NavigationView,
 ) -> NavigationPage {
-    let outer = Box::new(Orientation::Vertical, 0);
+    // ToolbarView is the modern shell — it handles background blending
+    // and scroll-edge styling between the HeaderBar and the
+    // PreferencesPage content automatically.
+    let toolbar = ToolbarView::new();
 
-    // Header with a trailing gear button that pushes the Settings page.
     let header = HeaderBar::new();
-    let settings_btn = Button::builder()
-        .icon_name("emblem-system-symbolic")
-        .tooltip_text("Global Settings")
-        .build();
-    settings_btn.add_css_class("flat");
-    {
-        let agent = agent.clone();
-        let overlay = overlay.clone();
-        let nav = nav.clone();
-        settings_btn.connect_clicked(move |_| {
-            let page = settings_page::build(agent.clone(), overlay.clone());
-            nav.push(&page);
-        });
-    }
-    header.pack_end(&settings_btn);
-    outer.append(&header);
+    let title = WindowTitle::new("odrive Manager", "");
+    header.set_title_widget(Some(&title));
 
-    // Status Group
-    let list = ListBox::new();
-    list.add_css_class("boxed-list");
-    list.set_margin_top(24);
-    list.set_margin_bottom(12);
-    list.set_margin_start(24);
-    list.set_margin_end(24);
+    // Primary menu (hamburger) on the right — current GNOME idiom for
+    // app-level commands. Houses Preferences and About; future entries
+    // (Pause / Resume, Quit on the panel-indicator side) will land here
+    // too.
+    let menu = primary_menu(&nav, &agent, &overlay);
+    let menu_btn = MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .menu_model(&menu.0)
+        .primary(true)
+        .tooltip_text("Main Menu")
+        .build();
+    install_menu_actions(&app, menu.1);
+    header.pack_start(&menu_btn);
+
+    toolbar.add_top_bar(&header);
+
+    // PreferencesPage normally clamps content to 600px and centres it; on
+    // GNOME 49's Adw build the default top padding under a HeaderBar is
+    // tight, so add explicit breathing room. We also nudge the title from
+    // each group up so they don't kiss the headerbar.
+    let page = PreferencesPage::new();
+    page.set_margin_top(12);
+
+    // ----- Agent group -----
+    let agent_group = PreferencesGroup::builder()
+        .title("Agent")
+        .description("Daemon lifecycle and the local placeholder index.")
+        .build();
 
     let status_row = ActionRow::builder()
-        .title("Agent Status")
+        .title("Status")
+        .subtitle("Checking…")
         .build();
-
-    let status_label = Label::builder()
-        .label("Checking...")
-        .valign(gtk::Align::Center)
-        .build();
-    status_row.add_suffix(&status_label);
-
     let start_stop_btn = Button::builder()
         .label("Start")
         .valign(gtk::Align::Center)
         .build();
+    start_stop_btn.add_css_class("pill");
     status_row.add_suffix(&start_stop_btn);
+    agent_group.add(&status_row);
 
-    list.append(&status_row);
-
-    // Placeholder Group
     let db_row = ActionRow::builder()
-        .title("Placeholder Database")
+        .title("Placeholder database")
         .subtitle("0 tracked items")
         .build();
-
     let scan_btn = Button::builder()
-        .label("Scan Now")
+        .label("Scan now")
         .valign(gtk::Align::Center)
         .build();
+    scan_btn.add_css_class("pill");
     db_row.add_suffix(&scan_btn);
-    list.append(&db_row);
+    agent_group.add(&db_row);
 
-    outer.append(&list);
+    page.add(&agent_group);
 
-    // Mounts List
-    let mount_list_title = Label::builder()
-        .label("Active Mounts")
-        .xalign(0.0)
-        .margin_start(28)
-        .margin_top(12)
+    // ----- Mounts group -----
+    let mounts_group = PreferencesGroup::builder()
+        .title("Mounts")
+        .description("Local folders mirrored from your odrive cloud account.")
         .build();
-    mount_list_title.add_css_class("heading");
-    outer.append(&mount_list_title);
+    page.add(&mounts_group);
 
-    let mount_list = ListBox::new();
-    mount_list.add_css_class("boxed-list");
-    mount_list.set_margin_top(6);
-    mount_list.set_margin_bottom(24);
-    mount_list.set_margin_start(24);
-    mount_list.set_margin_end(24);
-    outer.append(&mount_list);
+    toolbar.set_content(Some(&page));
 
-    // Update function — refreshes status, placeholder count, and rebuilds
-    // the mount list. Each mount row gets a trailing "Unmount" button
-    // that pops a confirmation dialog before calling the agent.
+    // Track every widget we've added to `mounts_group` so we can remove
+    // exactly those on the next tick. `PreferencesGroup.first_child()`
+    // returns its internal scaffolding box, not the rows we added —
+    // walking that tree blind triggers Adwaita-CRITICAL warnings.
+    let mounted_children: Rc<RefCell<Vec<gtk::Widget>>> = Rc::new(RefCell::new(Vec::new()));
+
+    // Update closure — refreshes the agent group, then rebuilds the
+    // mounts group from scratch each tick. Rebuilding from scratch
+    // keeps the wiring simple: each mount's row carries its own
+    // closures referencing its own path, with no need to diff.
     let update_ui = {
         let agent = agent.clone();
-        let status_label = status_label.clone();
+        let status_row = status_row.clone();
         let start_stop_btn = start_stop_btn.clone();
         let db_row = db_row.clone();
-        let mount_list = mount_list.clone();
-        let overlay_for_unmount = overlay.clone();
+        let mounts_group = mounts_group.clone();
+        let overlay = overlay.clone();
+        let mounted_children = mounted_children.clone();
         move || {
             let is_running = agent.is_running();
-            status_label.set_label(if is_running { "Running" } else { "Stopped" });
+            status_row.set_subtitle(if is_running { "Running" } else { "Stopped" });
             start_stop_btn.set_label(if is_running { "Stop" } else { "Start" });
+            if is_running {
+                start_stop_btn.remove_css_class("suggested-action");
+            } else {
+                start_stop_btn.add_css_class("suggested-action");
+            }
 
             if let Ok(db) = OdriveDb::open(agent.get_db_path()) {
                 let count = db.count_placeholders().unwrap_or(0);
                 db_row.set_subtitle(&format!("{} tracked items", count));
             }
 
-            // Refresh mount list
-            while let Some(child) = mount_list.first_child() {
-                mount_list.remove(&child);
+            // Drop the previous tick's children, then rebuild.
+            for child in mounted_children.borrow_mut().drain(..) {
+                mounts_group.remove(&child);
             }
 
-            if let Ok(mounts) = agent.get_mounts() {
-                if mounts.is_empty() {
-                    let empty_row = ActionRow::builder()
-                        .title("No active mounts")
+            match agent.get_mounts() {
+                Ok(mounts) if mounts.is_empty() => {
+                    let empty = StatusPage::builder()
+                        .icon_name("folder-symbolic")
+                        .title("No mounts yet")
+                        .description("Set up a mount through the onboarding wizard, or restart the app to launch it.")
                         .build();
-                    mount_list.append(&empty_row);
-                } else {
+                    empty.add_css_class("compact");
+                    mounts_group.add(&empty);
+                    mounted_children.borrow_mut().push(empty.upcast::<gtk::Widget>());
+                }
+                Ok(mounts) => {
                     for mount in mounts {
-                        let row = ActionRow::builder()
-                            .title(&mount.local_path)
-                            .subtitle(&format!("Remote: {} ({})", mount.remote_path, mount.status))
-                            .build();
-                        let unmount_btn = Button::builder()
-                            .label("Unmount")
-                            .valign(gtk::Align::Center)
-                            .build();
-                        unmount_btn.add_css_class("flat");
-                        {
-                            let agent = agent.clone();
-                            let overlay = overlay_for_unmount.clone();
-                            let local = mount.local_path.clone();
-                            unmount_btn.connect_clicked(move |btn| {
-                                confirm_and_unmount(
-                                    btn.upcast_ref::<gtk::Widget>(),
-                                    agent.clone(),
-                                    overlay.clone(),
-                                    local.clone(),
-                                );
-                            });
-                        }
-                        row.add_suffix(&unmount_btn);
-                        mount_list.append(&row);
+                        let row = build_mount_row(
+                            agent.clone(),
+                            overlay.clone(),
+                            mount.local_path.clone(),
+                            mount.remote_path.clone(),
+                            mount.status.clone(),
+                        );
+                        mounts_group.add(&row);
+                        mounted_children.borrow_mut().push(row.upcast::<gtk::Widget>());
                     }
                 }
-            } else {
-                let error_row = ActionRow::builder()
-                    .title("Unable to retrieve mounts")
-                    .build();
-                mount_list.append(&error_row);
+                Err(_) => {
+                    let err = StatusPage::builder()
+                        .icon_name("dialog-error-symbolic")
+                        .title("Couldn't list mounts")
+                        .description("The agent didn't respond to a status query. Try starting the agent.")
+                        .build();
+                    err.add_css_class("compact");
+                    mounts_group.add(&err);
+                    mounted_children.borrow_mut().push(err.upcast::<gtk::Widget>());
+                }
             }
         }
     };
 
-    // Initial update
     update_ui();
 
     // Background poll — refreshes status, placeholder count, and the
@@ -250,7 +289,6 @@ fn build_dashboard_page(
         }
     });
 
-    // Button actions
     start_stop_btn.connect_clicked({
         let agent = agent.clone();
         let update = update_ui.clone();
@@ -284,9 +322,57 @@ fn build_dashboard_page(
 
     NavigationPage::builder()
         .title("odrive Manager")
-        .child(&outer)
+        .child(&toolbar)
         .can_pop(false)
         .build()
+}
+
+/// Build a single mount entry. Phase 2 will hook the row's `activated`
+/// signal to push a mount-detail page; for now activation is a no-op
+/// (the chevron is purely a visual affordance for the upcoming flow).
+fn build_mount_row(
+    agent: Rc<OdriveAgent>,
+    overlay: ToastOverlay,
+    local_path: String,
+    remote_path: String,
+    status: String,
+) -> ActionRow {
+    let row = ActionRow::builder()
+        .title(&local_path)
+        .subtitle(&format!("{} • {}", remote_path, status))
+        .activatable(true)
+        .build();
+
+    // Leading folder icon for visual hierarchy. Bump the pixel size from
+    // the default 16px to 24px so it doesn't look squished inside the
+    // row's rounded corner; symbolic icons scale crisply at this size.
+    let icon = adw::gtk::Image::from_icon_name("folder-symbolic");
+    icon.set_pixel_size(24);
+    row.add_prefix(&icon);
+
+    let unmount_btn = Button::builder()
+        .icon_name("user-trash-symbolic")
+        .tooltip_text("Unmount")
+        .valign(gtk::Align::Center)
+        .build();
+    unmount_btn.add_css_class("flat");
+    unmount_btn.add_css_class("circular");
+    {
+        let agent = agent.clone();
+        let overlay = overlay.clone();
+        let local_path = local_path.clone();
+        unmount_btn.connect_clicked(move |btn| {
+            confirm_and_unmount(
+                btn.upcast_ref::<gtk::Widget>(),
+                agent.clone(),
+                overlay.clone(),
+                local_path.clone(),
+            );
+        });
+    }
+    row.add_suffix(&unmount_btn);
+
+    row
 }
 
 /// Pop a destructive-style confirmation dialog before calling
@@ -331,4 +417,74 @@ fn confirm_and_unmount(
         dlg.close();
     });
     dialog.present();
+}
+
+/// Build the primary menu model and the action callbacks that back its
+/// items. Returns the model and a vector of (action_name, callback)
+/// pairs to be installed on the application via
+/// `install_menu_actions`.
+fn primary_menu(
+    nav: &NavigationView,
+    agent: &Rc<OdriveAgent>,
+    overlay: &ToastOverlay,
+) -> (gio::Menu, Vec<(String, Box<dyn Fn() + 'static>)>) {
+    let menu = gio::Menu::new();
+    let section = gio::Menu::new();
+    section.append(Some("_Preferences"), Some("app.preferences"));
+    section.append(Some("_About odrive Manager"), Some("app.about"));
+    menu.append_section(None, &section);
+
+    let mut actions: Vec<(String, Box<dyn Fn() + 'static>)> = Vec::new();
+
+    // Preferences action → push the settings page onto the nav stack.
+    {
+        let nav = nav.clone();
+        let agent = agent.clone();
+        let overlay = overlay.clone();
+        actions.push((
+            "preferences".to_string(),
+            Box::new(move || {
+                let page = settings_page::build(agent.clone(), overlay.clone());
+                nav.push(&page);
+            }),
+        ));
+    }
+
+    // About action → fire a minimal Adw.AboutWindow. The version string
+    // is pulled from Cargo so a release bump propagates without code
+    // edits.
+    {
+        let overlay = overlay.clone();
+        actions.push((
+            "about".to_string(),
+            Box::new(move || {
+                let about = adw::AboutWindow::builder()
+                    .application_name("odrive Manager")
+                    .application_icon("folder-remote-symbolic")
+                    .version(env!("CARGO_PKG_VERSION"))
+                    .developer_name("odrive-linux contributors")
+                    .website("https://www.odrive.com")
+                    .license_type(gtk::License::MitX11)
+                    .modal(true)
+                    .build();
+                if let Some(root) = overlay
+                    .root()
+                    .and_then(|r| r.downcast::<gtk::Window>().ok())
+                {
+                    about.set_transient_for(Some(&root));
+                }
+                about.present();
+            }),
+        ));
+    }
+
+    (menu, actions)
+}
+
+fn install_menu_actions(app: &Application, actions: Vec<(String, Box<dyn Fn() + 'static>)>) {
+    for (name, callback) in actions {
+        let action = gio::SimpleAction::new(&name, None);
+        action.connect_activate(move |_, _| callback());
+        app.add_action(&action);
+    }
 }

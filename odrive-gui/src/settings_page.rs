@@ -5,16 +5,20 @@
 //! we surface the CLI error verbatim as a toast and revert the row to
 //! the value the agent reports back.
 //!
+//! Layout follows current libadwaita idioms: `Adw.ToolbarView` wraps a
+//! `HeaderBar` + `Adw.PreferencesPage`, and the rows are split across
+//! `Adw.PreferencesGroup`s ("General" / "Premium").
+//!
 //! Long-running operations are not expected here (each setter is a
 //! single CLI invocation that exits immediately) so we run them
 //! synchronously on the GTK main thread.
 use libadwaita as adw;
 use adw::prelude::*;
-use adw::gtk as gtk;
 use adw::{
-    ComboRow, HeaderBar, NavigationPage, PreferencesGroup, Toast, ToastOverlay,
+    ComboRow, HeaderBar, NavigationPage, PreferencesGroup, PreferencesPage, Toast, ToastOverlay,
+    ToolbarView,
 };
-use gtk::{Box as GtkBox, Orientation, StringList};
+use adw::gtk::StringList;
 use odrive_core::{
     AutoUnsyncThreshold, OdriveAgent, PlaceholderThreshold, XlThreshold,
 };
@@ -22,35 +26,40 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 pub fn build(agent: Rc<OdriveAgent>, overlay: ToastOverlay) -> NavigationPage {
-    let outer = GtkBox::new(Orientation::Vertical, 0);
-    outer.append(&HeaderBar::new());
+    let toolbar = ToolbarView::new();
+    toolbar.add_top_bar(&HeaderBar::new());
 
-    let body = GtkBox::new(Orientation::Vertical, 12);
-    body.set_margin_top(24);
-    body.set_margin_bottom(24);
-    body.set_margin_start(24);
-    body.set_margin_end(24);
-
-    let group = PreferencesGroup::builder()
-        .title("Global Settings")
-        .description("Defaults applied to all mounts. Per-folder rules can override these.")
-        .build();
+    let page = PreferencesPage::new();
+    page.set_margin_top(12);
 
     // Initial values — fall back to defaults if the agent isn't reachable;
     // the comboboxes will simply show the upstream defaults until the user
     // adjusts them.
     let initial = agent.get_global_settings().unwrap_or_default();
 
+    // ----- General group -----
+    let general = PreferencesGroup::builder()
+        .title("General")
+        .description("Defaults applied to all mounts. Per-folder rules can override these.")
+        .build();
+
     let placeholder_row = build_placeholder_row(initial.placeholder);
     let xl_row = build_xl_row(initial.xl);
+    general.add(&placeholder_row);
+    general.add(&xl_row);
+    page.add(&general);
+
+    // ----- Premium group -----
+    let premium = PreferencesGroup::builder()
+        .title("Premium")
+        .description("Requires an active odrive Premium subscription. Settings here will be rejected by the agent on free accounts.")
+        .build();
+
     let auto_unsync_row = build_auto_unsync_row(initial.auto_unsync);
+    premium.add(&auto_unsync_row);
+    page.add(&premium);
 
-    group.add(&placeholder_row);
-    group.add(&xl_row);
-    group.add(&auto_unsync_row);
-
-    body.append(&group);
-    outer.append(&body);
+    toolbar.set_content(Some(&page));
 
     // Re-entrancy guard: applying a value may cause us to revert the
     // selection on error, which itself fires `notify::selected`. Without
@@ -63,8 +72,8 @@ pub fn build(agent: Rc<OdriveAgent>, overlay: ToastOverlay) -> NavigationPage {
     wire_auto_unsync(&auto_unsync_row, agent.clone(), overlay.clone(), suppress.clone());
 
     NavigationPage::builder()
-        .title("Settings")
-        .child(&outer)
+        .title("Preferences")
+        .child(&toolbar)
         .build()
 }
 
@@ -100,7 +109,7 @@ const AUTO_UNSYNC_VARIANTS: &[AutoUnsyncThreshold] = &[
 
 fn build_placeholder_row(initial: PlaceholderThreshold) -> ComboRow {
     let row = ComboRow::builder()
-        .title("Sync Threshold")
+        .title("Sync threshold")
         .subtitle("Files at or below this size auto-download when synced")
         .model(&StringList::new(PLACEHOLDER_LABELS))
         .build();
@@ -110,7 +119,7 @@ fn build_placeholder_row(initial: PlaceholderThreshold) -> ComboRow {
 
 fn build_xl_row(initial: XlThreshold) -> ComboRow {
     let row = ComboRow::builder()
-        .title("Split Threshold")
+        .title("Split threshold")
         .subtitle("Files larger than this are uploaded in chunks")
         .model(&StringList::new(XL_LABELS))
         .build();
@@ -120,7 +129,7 @@ fn build_xl_row(initial: XlThreshold) -> ComboRow {
 
 fn build_auto_unsync_row(initial: AutoUnsyncThreshold) -> ComboRow {
     let row = ComboRow::builder()
-        .title("Unsync Threshold (Premium)")
+        .title("Unsync threshold")
         .subtitle("Files untouched for this long revert to placeholders")
         .model(&StringList::new(AUTO_UNSYNC_LABELS))
         .build();
@@ -200,8 +209,6 @@ fn wire_auto_unsync(
         match agent.auto_unsync_threshold(value) {
             Ok(_) => overlay.add_toast(Toast::new("Unsync threshold updated")),
             Err(e) => {
-                // Most likely failure mode: non-premium account. Surface
-                // the upstream message verbatim and revert the row.
                 overlay.add_toast(Toast::new(&format!("Update failed: {}", e)));
                 revert_to_agent_state(&row_clone, &agent, &suppress, GlobalSelector::AutoUnsync);
             }
