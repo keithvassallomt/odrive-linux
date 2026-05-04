@@ -107,6 +107,176 @@ pub struct OdriveMount {
     pub status: String,
 }
 
+/// `odrive placeholderthreshold` accepts these tokens. The tokens we send
+/// on the CLI (`never`/`small`/`medium`/`large`/`always`) do NOT match
+/// the way the upstream reports them back in `odrive status` — `never`
+/// renders as `neverDownload` and `always` renders as `alwaysDownload`.
+/// `as_cli_arg` and `from_status_token` straddle that asymmetry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlaceholderThreshold {
+    Never,
+    Small,
+    Medium,
+    Large,
+    Always,
+}
+
+impl PlaceholderThreshold {
+    pub fn as_cli_arg(self) -> &'static str {
+        match self {
+            PlaceholderThreshold::Never => "never",
+            PlaceholderThreshold::Small => "small",
+            PlaceholderThreshold::Medium => "medium",
+            PlaceholderThreshold::Large => "large",
+            PlaceholderThreshold::Always => "always",
+        }
+    }
+
+    fn from_status_token(token: &str) -> Option<Self> {
+        match token {
+            "neverDownload" | "never" => Some(PlaceholderThreshold::Never),
+            "small" => Some(PlaceholderThreshold::Small),
+            "medium" => Some(PlaceholderThreshold::Medium),
+            "large" => Some(PlaceholderThreshold::Large),
+            "alwaysDownload" | "always" => Some(PlaceholderThreshold::Always),
+            _ => None,
+        }
+    }
+}
+
+/// `odrive xlthreshold` (split-large-files threshold). CLI sends
+/// `xlarge`; status reports it as `extraLarge`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum XlThreshold {
+    Never,
+    Small,
+    Medium,
+    Large,
+    Xlarge,
+}
+
+impl XlThreshold {
+    pub fn as_cli_arg(self) -> &'static str {
+        match self {
+            XlThreshold::Never => "never",
+            XlThreshold::Small => "small",
+            XlThreshold::Medium => "medium",
+            XlThreshold::Large => "large",
+            XlThreshold::Xlarge => "xlarge",
+        }
+    }
+
+    fn from_status_token(token: &str) -> Option<Self> {
+        match token {
+            "never" => Some(XlThreshold::Never),
+            "small" => Some(XlThreshold::Small),
+            "medium" => Some(XlThreshold::Medium),
+            "large" => Some(XlThreshold::Large),
+            "extraLarge" | "xlarge" => Some(XlThreshold::Xlarge),
+            _ => None,
+        }
+    }
+}
+
+/// `odrive autounsyncthreshold` accepts and reports identical tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AutoUnsyncThreshold {
+    Never,
+    Day,
+    Week,
+    Month,
+}
+
+impl AutoUnsyncThreshold {
+    pub fn as_cli_arg(self) -> &'static str {
+        match self {
+            AutoUnsyncThreshold::Never => "never",
+            AutoUnsyncThreshold::Day => "day",
+            AutoUnsyncThreshold::Week => "week",
+            AutoUnsyncThreshold::Month => "month",
+        }
+    }
+
+    fn from_status_token(token: &str) -> Option<Self> {
+        match token {
+            "never" => Some(AutoUnsyncThreshold::Never),
+            "day" => Some(AutoUnsyncThreshold::Day),
+            "week" => Some(AutoUnsyncThreshold::Week),
+            "month" => Some(AutoUnsyncThreshold::Month),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GlobalSettings {
+    pub placeholder: PlaceholderThreshold,
+    pub xl: XlThreshold,
+    pub auto_unsync: AutoUnsyncThreshold,
+    pub sync_enabled: bool,
+}
+
+impl Default for GlobalSettings {
+    fn default() -> Self {
+        // Match upstream defaults: full download, no split, no auto-unsync,
+        // sync enabled. These are the values a fresh agent reports before
+        // any threshold tweaks have been applied.
+        Self {
+            placeholder: PlaceholderThreshold::Always,
+            xl: XlThreshold::Never,
+            auto_unsync: AutoUnsyncThreshold::Never,
+            sync_enabled: true,
+        }
+    }
+}
+
+/// Pull the four global-settings markers out of `odrive status` text.
+/// The upstream prints lines shaped like
+/// `placeholderThreshold: neverDownload` (sometimes with extra whitespace
+/// and other status fields packed onto the same line, separated by runs
+/// of spaces). We scan token-by-token for a known marker key followed by
+/// its value; missing or unrecognised markers fall back to defaults
+/// rather than panicking, so a future upstream wording change degrades
+/// gracefully.
+pub fn parse_global_settings(status_text: &str) -> GlobalSettings {
+    let mut out = GlobalSettings::default();
+    for line in status_text.lines() {
+        let mut tokens = line.split_whitespace().peekable();
+        while let Some(tok) = tokens.next() {
+            match tok {
+                "placeholderThreshold:" => {
+                    if let Some(v) = tokens.next() {
+                        if let Some(p) = PlaceholderThreshold::from_status_token(v) {
+                            out.placeholder = p;
+                        }
+                    }
+                }
+                "xlThreshold:" => {
+                    if let Some(v) = tokens.next() {
+                        if let Some(x) = XlThreshold::from_status_token(v) {
+                            out.xl = x;
+                        }
+                    }
+                }
+                "autoUnsyncThreshold:" => {
+                    if let Some(v) = tokens.next() {
+                        if let Some(a) = AutoUnsyncThreshold::from_status_token(v) {
+                            out.auto_unsync = a;
+                        }
+                    }
+                }
+                "syncEnabled:" => {
+                    if let Some(v) = tokens.next() {
+                        out.sync_enabled = matches!(v, "True" | "true");
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
 pub struct OdriveAgent {
     bin_path: String,
     agent_path: String,
@@ -453,6 +623,93 @@ curl -fL "https://dl.odrive.com/odrivecli-lnx-64" | tar -xzf- -C "$od/"
         }
     }
 
+    /// Wrapper for `odrive unmount <local>`. Mirror of `mount`; removes
+    /// the mount entry from the agent but leaves any already-synced
+    /// files on disk for the user to handle.
+    pub fn unmount(&self, local: &str) -> Result<String, OdriveError> {
+        let output = Command::new(&self.bin_path)
+            .arg("unmount")
+            .arg(local)
+            .output()?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            Err(OdriveError::CliError(String::from_utf8_lossy(&output.stderr).to_string()))
+        }
+    }
+
+    /// Wrapper for `odrive placeholderthreshold <value>`. Sets the
+    /// global default for which files materialise on sync vs. stay as
+    /// placeholders.
+    pub fn placeholder_threshold(&self, value: PlaceholderThreshold) -> Result<String, OdriveError> {
+        let output = Command::new(&self.bin_path)
+            .arg("placeholderthreshold")
+            .arg(value.as_cli_arg())
+            .output()?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            Err(OdriveError::CliError(String::from_utf8_lossy(&output.stderr).to_string()))
+        }
+    }
+
+    /// Wrapper for `odrive xlthreshold <value>`. Sets the size at which
+    /// large files get split into chunks during upload.
+    pub fn xl_threshold(&self, value: XlThreshold) -> Result<String, OdriveError> {
+        let output = Command::new(&self.bin_path)
+            .arg("xlthreshold")
+            .arg(value.as_cli_arg())
+            .output()?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            Err(OdriveError::CliError(String::from_utf8_lossy(&output.stderr).to_string()))
+        }
+    }
+
+    /// Wrapper for `odrive autounsyncthreshold <value>`. Files
+    /// untouched for the configured period get reverted to placeholders.
+    /// Premium-tier feature upstream; non-premium accounts get a CLI
+    /// error which we surface verbatim.
+    pub fn auto_unsync_threshold(&self, value: AutoUnsyncThreshold) -> Result<String, OdriveError> {
+        let output = Command::new(&self.bin_path)
+            .arg("autounsyncthreshold")
+            .arg(value.as_cli_arg())
+            .output()?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            Err(OdriveError::CliError(String::from_utf8_lossy(&output.stderr).to_string()))
+        }
+    }
+
+    /// Wrapper for `odrive shutdown`. Terminates the agent cleanly.
+    /// Used by the panel indicator's "Quit" item.
+    pub fn shutdown(&self) -> Result<String, OdriveError> {
+        let output = Command::new(&self.bin_path)
+            .arg("shutdown")
+            .output()?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            Err(OdriveError::CliError(String::from_utf8_lossy(&output.stderr).to_string()))
+        }
+    }
+
+    /// Snapshot the four global threshold-style settings by parsing the
+    /// human-readable `odrive status` text. Falls back to defaults when
+    /// the agent isn't reachable; the caller can distinguish that case
+    /// via `get_status()` if they care.
+    pub fn get_global_settings(&self) -> Result<GlobalSettings, OdriveError> {
+        let status = self.get_status()?;
+        Ok(parse_global_settings(&status.sync_status))
+    }
+
     pub fn get_mounts(&self) -> Result<Vec<OdriveMount>, OdriveError> {
         // The upstream odrive CLI has no `mounts` subcommand — mount info is
         // exposed via `odrive status --mounts`, which prints two lines per
@@ -577,6 +834,96 @@ mod tests {
         assert!(!is_authenticated_marker("isActivated: True"));
         assert!(!is_authenticated_marker("hasSession: True"));
         assert!(!is_authenticated_marker(""));
+    }
+
+    #[test]
+    fn parse_global_settings_real_status_text() {
+        // Real shape observed from `odrive status` on this box, with the
+        // four markers we care about wedged into multi-field lines
+        // (upstream packs several settings onto one line separated by
+        // runs of whitespace).
+        let s = "\
+isActivated: True                                               hasSession: True
+email: keith@example.com
+syncEnabled: True                                               mounts: 1
+placeholderThreshold: neverDownload                             autoUnsyncThreshold: never
+xlThreshold: extraLarge
+";
+        let g = parse_global_settings(s);
+        assert_eq!(g.placeholder, PlaceholderThreshold::Never);
+        assert_eq!(g.xl, XlThreshold::Xlarge);
+        assert_eq!(g.auto_unsync, AutoUnsyncThreshold::Never);
+        assert!(g.sync_enabled);
+    }
+
+    #[test]
+    fn parse_global_settings_alwaysdownload_and_disabled() {
+        let s = "\
+placeholderThreshold: alwaysDownload
+xlThreshold: small
+autoUnsyncThreshold: month
+syncEnabled: False
+";
+        let g = parse_global_settings(s);
+        assert_eq!(g.placeholder, PlaceholderThreshold::Always);
+        assert_eq!(g.xl, XlThreshold::Small);
+        assert_eq!(g.auto_unsync, AutoUnsyncThreshold::Month);
+        assert!(!g.sync_enabled);
+    }
+
+    #[test]
+    fn parse_global_settings_missing_markers_fall_back_to_defaults() {
+        // No marker present at all → entire struct equals Default.
+        let g = parse_global_settings("isActivated: True\nemail: x@y\n");
+        let d = GlobalSettings::default();
+        assert_eq!(g.placeholder, d.placeholder);
+        assert_eq!(g.xl, d.xl);
+        assert_eq!(g.auto_unsync, d.auto_unsync);
+        assert_eq!(g.sync_enabled, d.sync_enabled);
+    }
+
+    #[test]
+    fn parse_global_settings_unknown_value_keeps_default() {
+        // Marker present but value unparseable → that one field stays
+        // at default; the others still parse normally.
+        let s = "\
+placeholderThreshold: gibberish
+xlThreshold: medium
+";
+        let g = parse_global_settings(s);
+        assert_eq!(g.placeholder, GlobalSettings::default().placeholder);
+        assert_eq!(g.xl, XlThreshold::Medium);
+    }
+
+    #[test]
+    fn threshold_cli_args_round_trip() {
+        // The CLI tokens we send and the status tokens we accept should
+        // both map back to the same enum variant.
+        for v in [
+            PlaceholderThreshold::Never,
+            PlaceholderThreshold::Small,
+            PlaceholderThreshold::Medium,
+            PlaceholderThreshold::Large,
+            PlaceholderThreshold::Always,
+        ] {
+            assert_eq!(
+                PlaceholderThreshold::from_status_token(v.as_cli_arg()),
+                Some(v)
+            );
+        }
+        // Status-only renderings:
+        assert_eq!(
+            PlaceholderThreshold::from_status_token("neverDownload"),
+            Some(PlaceholderThreshold::Never)
+        );
+        assert_eq!(
+            PlaceholderThreshold::from_status_token("alwaysDownload"),
+            Some(PlaceholderThreshold::Always)
+        );
+        assert_eq!(
+            XlThreshold::from_status_token("extraLarge"),
+            Some(XlThreshold::Xlarge)
+        );
     }
 
     #[test]
