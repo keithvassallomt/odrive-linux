@@ -102,11 +102,15 @@ fn install_app_css() {
     // (My earlier `preferencesgroup > box > label.description` selector
     // was one level too shallow — the description sits inside a nested
     // header box, not directly under the outer vertical box.)
+    // Single-line rows would otherwise collapse to ~25-30px tall — a
+    // 40px floor lets a one-line "Tenders" row breathe without making
+    // a two-line title+subtitle row visibly inflated.
     css.load_from_string(
         "preferencesgroup .description { opacity: 0.55; }\n\
          row .subtitle { opacity: 0.6; }\n\
          preferencesgroup { margin-bottom: 18px; }\n\
          preferencesgroup .boxed-list { margin-top: 12px; }\n\
+         .boxed-list > row { min-height: 40px; padding-left: 6px; padding-right: 6px; }\n\
          preferencespage > scrolledwindow > viewport > clamp { margin-top: 6px; }\n",
     );
     if let Some(display) = gdk::Display::default() {
@@ -350,14 +354,19 @@ fn build_mount_row(
     // Leading folder icon for visual hierarchy. Bump the pixel size from
     // the default 16px to 24px so it doesn't look squished inside the
     // row's rounded corner; symbolic icons scale crisply at this size.
+    // margin_start nudges the icon off the row's left edge; margin_end
+    // separates the icon from the title (otherwise they touch).
     let icon = adw::gtk::Image::from_icon_name("folder-symbolic");
     icon.set_pixel_size(24);
+    icon.set_margin_start(6);
+    icon.set_margin_end(8);
     row.add_prefix(&icon);
 
     // Trailing chevron — visual cue that the row drills into a detail
     // page. Sits before the unmount button so the destructive icon is
     // closer to the row edge.
     let chevron = adw::gtk::Image::from_icon_name("go-next-symbolic");
+    chevron.set_margin_start(6);
     row.add_suffix(&chevron);
 
     let unmount_btn = Button::builder()

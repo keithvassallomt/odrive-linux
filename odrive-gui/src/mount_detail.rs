@@ -247,8 +247,12 @@ fn build_subfolder_row(state: &Rc<PageState>, sub: &Path) -> ActionRow {
         .activatable(true)
         .build();
 
+    // Match the dashboard's mount-row treatment so the icon sits a bit
+    // off the left edge and there's a real gap before the title.
     let icon = Image::from_icon_name("folder-symbolic");
     icon.set_pixel_size(20);
+    icon.set_margin_start(6);
+    icon.set_margin_end(8);
     row.add_prefix(&icon);
 
     // Mark with a "rule set" badge if there's a folder rule for this
@@ -258,11 +262,13 @@ fn build_subfolder_row(state: &Rc<PageState>, sub: &Path) -> ActionRow {
             let badge = Label::new(Some(&format_rule_badge(&rule)));
             badge.add_css_class("dim-label");
             badge.add_css_class("caption");
+            badge.set_margin_end(6);
             row.add_suffix(&badge);
         }
     }
 
     let chevron = Image::from_icon_name("go-next-symbolic");
+    chevron.set_margin_start(6);
     row.add_suffix(&chevron);
 
     {
