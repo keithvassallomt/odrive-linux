@@ -102,6 +102,18 @@ fn present_dashboard(app: &Application) {
     // and the Manager runs without a tray icon.
     indicator::install(app, &window, agent.clone());
 
+    // Closing the window via the [X] button only hides it — the tray
+    // icon and its "Open odrive Manager" item stay live. The hold
+    // guard keeps the GTK process running once no windows are
+    // visible (the default would be to quit). Leaked deliberately so
+    // it lives for the rest of the process; Tray Quit's `app.quit()`
+    // exits regardless of hold count.
+    Box::leak(Box::new(app.hold()));
+    window.connect_close_request(|w| {
+        w.set_visible(false);
+        gtk::glib::Propagation::Stop
+    });
+
     window.present();
 }
 
