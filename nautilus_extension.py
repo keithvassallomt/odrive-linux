@@ -140,8 +140,31 @@ class OdriveExtension(GObject.GObject, Nautilus.MenuProvider, Nautilus.InfoProvi
     # works on most distros; the semantic is "downloadable" rather
     # than "in the Downloads folder", close enough for V1. Swap to a
     # bundled `emblem-odrive-cloud-symbolic` if/when we package one.
+    #
+    # We also opportunistically pad zero-byte placeholders to one byte
+    # so GLib's `application/x-zerosize` hardcoding stops blocking
+    # MIME-based double-click activation. The upstream odrive agent
+    # identifies placeholders by the `.cloud`/`.cloudf` extension, not
+    # by zero size, so the null byte is invisible to it. See
+    # `odrive-core::pad_placeholder` for the matching behaviour during
+    # `odrive-cli scan`.
     def update_file_info(self, file):
         name = file.get_name()
         if name.endswith('.cloud') or name.endswith('.cloudf'):
             file.add_emblem('emblem-downloads')
+            self._maybe_pad_placeholder(file)
         return Nautilus.OperationResult.COMPLETE
+
+    def _maybe_pad_placeholder(self, file):
+        try:
+            path = file.get_location().get_path()
+            if path is None:
+                return
+            if os.path.getsize(path) == 0:
+                with open(path, 'ab') as f:
+                    f.write(b'\0')
+                # Tell Nautilus to re-resolve content-type so the new
+                # default-app association takes effect on the next click.
+                file.invalidate_extension_info()
+        except (OSError, IOError):
+            pass  # Read-only filesystem, gone, no permission — silently skip.

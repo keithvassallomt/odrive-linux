@@ -869,6 +869,9 @@ curl -fL "https://dl.odrive.com/odrivecli-lnx-64" | tar -xzf- -C "$od/"
                 if file_name.ends_with(".cloud") || file_name.ends_with(".cloudf") {
                     let is_folder = file_name.ends_with(".cloudf");
                     let local_path = path.to_string_lossy();
+                    if let Err(e) = pad_placeholder(&path) {
+                        log::warn!("scan: failed to pad placeholder {}: {}", local_path, e);
+                    }
                     if let Err(e) = db.upsert_placeholder(&local_path, is_folder, "placeholder") {
                         log::warn!("scan: failed to record placeholder {}: {}", local_path, e);
                         continue;
@@ -886,6 +889,27 @@ curl -fL "https://dl.odrive.com/odrivecli-lnx-64" | tar -xzf- -C "$od/"
         visit_dirs(Path::new(mount_path), &db, &mut count)?;
         Ok(count)
     }
+}
+
+/// Ensure a placeholder file is at least one byte. The upstream odrive
+/// agent identifies placeholders by their `.cloud` / `.cloudf` extension,
+/// not by zero size, so a single null byte is invisible to it. But GLib's
+/// content-type resolver hardcodes empty files to `application/x-zerosize`
+/// before consulting glob rules, which prevents Nautilus from finding our
+/// MIME-typed handler. Padding to one byte lets the glob match win and
+/// makes double-click activation work.
+///
+/// No-op if the file is already non-empty. Returns true if a byte was
+/// written, false if already padded.
+pub fn pad_placeholder(path: &Path) -> std::io::Result<bool> {
+    let metadata = fs::metadata(path)?;
+    if metadata.len() > 0 {
+        return Ok(false);
+    }
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new().append(true).open(path)?;
+    file.write_all(&[0u8])?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -1069,6 +1093,30 @@ xlThreshold: medium
             FolderSyncThreshold::from_db_value(-2),
             FolderSyncThreshold::None
         );
+    }
+
+    #[test]
+    fn pad_placeholder_writes_one_byte_when_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("foo.cloud");
+        std::fs::write(&p, b"").unwrap();
+        let padded = pad_placeholder(&p).unwrap();
+        assert!(padded);
+        let bytes = std::fs::read(&p).unwrap();
+        assert_eq!(bytes, vec![0u8]);
+    }
+
+    #[test]
+    fn pad_placeholder_skips_already_padded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("foo.cloud");
+        std::fs::write(&p, b"\0").unwrap();
+        let padded = pad_placeholder(&p).unwrap();
+        assert!(!padded);
+        // Content must be untouched — this is what protects post-sync
+        // files (which may be non-empty real content) if a stray scan
+        // hits them before the .cloud suffix is stripped.
+        assert_eq!(std::fs::read(&p).unwrap(), vec![0u8]);
     }
 
     #[test]
