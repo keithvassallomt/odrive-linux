@@ -72,7 +72,7 @@ pub fn build(agent: Rc<OdriveAgent>, overlay: ToastOverlay) -> NavigationPage {
 // Row builders
 // ---------------------------------------------------------------------------
 
-const PLACEHOLDER_LABELS: &[&str] = &["Never", "Small (10 MB)", "Medium (100 MB)", "Large (500 MB)", "Always"];
+const PLACEHOLDER_LABELS: &[&str] = &["0 (no auto-download)", "Small (10 MB)", "Medium (100 MB)", "Large (500 MB)", "Unlimited"];
 const PLACEHOLDER_VARIANTS: &[PlaceholderThreshold] = &[
     PlaceholderThreshold::Never,
     PlaceholderThreshold::Small,
