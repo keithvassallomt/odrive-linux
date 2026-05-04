@@ -334,6 +334,7 @@ pub fn parse_global_settings(status_text: &str) -> GlobalSettings {
     out
 }
 
+#[derive(Clone)]
 pub struct OdriveAgent {
     bin_path: String,
     agent_path: String,
