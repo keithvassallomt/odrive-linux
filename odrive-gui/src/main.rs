@@ -1,3 +1,4 @@
+mod indicator;
 mod mount_detail;
 mod settings_page;
 mod wizard;
@@ -83,6 +84,12 @@ fn present_dashboard(app: &Application) {
         .default_height(520)
         .content(&overlay)
         .build();
+
+    // Panel indicator: lives for the lifetime of this dashboard window.
+    // If the StatusNotifierItem host isn't available (stock GNOME
+    // without the appindicator extension) install() logs a warning
+    // and the Manager runs without a tray icon.
+    indicator::install(app, &window, agent.clone());
 
     window.present();
 }
