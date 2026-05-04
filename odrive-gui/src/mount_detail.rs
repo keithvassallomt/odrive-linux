@@ -202,7 +202,9 @@ fn first_time_setup_widget(state: &Rc<PageState>) -> StatusPage {
             let agent_for_worker = state.agent.as_ref().clone();
             let state_for_done = state.clone();
             let btn_for_done = btn.clone();
-            worker::spawn(
+            spawn_sync(
+                &state.agent,
+                state.folder_path.clone(),
                 move || agent_for_worker.sync_recursive(&target, true),
                 move |result: Result<String, OdriveError>| {
                     btn_for_done.set_sensitive(true);
@@ -372,6 +374,49 @@ fn format_rule_badge(rule: &FolderRule) -> String {
 
 fn open_db(agent: &OdriveAgent) -> Option<OdriveDb> {
     OdriveDb::open(agent.get_db_path()).ok()
+}
+
+/// Wrap `worker::spawn` for folder-level sync operations: mark the
+/// folder as in-progress in the cross-process DB before kickoff, clear
+/// when done. The Nautilus extension paints `odrive-syncing` on any
+/// folder whose path is in this set, so this is what drives the
+/// transient syncing emblem during expand / Sync now / Save+Apply.
+fn spawn_sync<T, F, G>(
+    agent: &Rc<OdriveAgent>,
+    folder_path: String,
+    work: F,
+    on_done: G,
+) where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+    G: FnOnce(T) + 'static,
+{
+    let db_path = agent.get_db_path();
+    let path_for_clear = folder_path.clone();
+
+    if let Ok(db) = OdriveDb::open(&db_path) {
+        let _ = db.mark_sync_in_progress(&folder_path);
+    }
+    touch_mtime(&folder_path);
+
+    worker::spawn(work, move |result: T| {
+        if let Ok(db) = OdriveDb::open(&db_path) {
+            let _ = db.clear_sync_in_progress(&path_for_clear);
+        }
+        touch_mtime(&path_for_clear);
+        on_done(result);
+    });
+}
+
+/// Bump a path's mtime so Nautilus's directory-listing inotify fires
+/// and re-calls `update_file_info` — that's how the syncing emblem
+/// appears/disappears in real time. Best-effort: silently no-ops if
+/// the path doesn't exist (e.g. a `.cloudf` already replaced by its
+/// expanded folder when we clear).
+fn touch_mtime(path: &str) {
+    if let Ok(f) = std::fs::File::open(path) {
+        let _ = f.set_modified(std::time::SystemTime::now());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -575,7 +620,9 @@ fn build_rule_group(state: &Rc<PageState>) -> PreferencesGroup {
             let path = state.folder_path.clone();
             let state_for_done = state.clone();
             let btn_for_done = btn.clone();
-            worker::spawn(
+            spawn_sync(
+                &state.agent,
+                state.folder_path.clone(),
                 move || agent_for_worker.sync_recursive(&path, false),
                 move |result: Result<String, OdriveError>| {
                     btn_for_done.set_sensitive(true);
@@ -670,7 +717,9 @@ fn build_rule_group(state: &Rc<PageState>) -> PreferencesGroup {
                         let agent_for_worker = state.agent.as_ref().clone();
                         let path = state.folder_path.clone();
                         let state_for_done = state.clone();
-                        worker::spawn(
+                        spawn_sync(
+                            &state.agent,
+                            state.folder_path.clone(),
                             move || agent_for_worker.sync_recursive(&path, false),
                             move |result: Result<String, OdriveError>| {
                                 let toast = match result {

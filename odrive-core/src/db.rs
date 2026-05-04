@@ -61,6 +61,19 @@ impl OdriveDb {
             )",
             [],
         )?;
+        // Cross-process state: who's currently running a sync against
+        // which folder. The GUI inserts a row before kicking off
+        // `sync_recursive` and deletes it on completion (success or
+        // failure). The Nautilus extension reads this on a short poll
+        // and paints `odrive-syncing` on matching folders.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS sync_in_progress (
+                id INTEGER PRIMARY KEY,
+                local_path TEXT NOT NULL UNIQUE,
+                started_at INTEGER NOT NULL
+            )",
+            [],
+        )?;
         Ok(())
     }
 
@@ -157,6 +170,48 @@ impl OdriveDb {
         self.conn
             .execute("DELETE FROM folder_sync_rules WHERE local_path = ?1", params![local_path])?;
         Ok(())
+    }
+
+    /// Mark `local_path` as currently syncing. Idempotent — re-marking
+    /// an already-tracked path just refreshes the `started_at`
+    /// timestamp.
+    pub fn mark_sync_in_progress(&self, local_path: &str) -> Result<()> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.conn.execute(
+            "INSERT INTO sync_in_progress (local_path, started_at)
+             VALUES (?1, ?2)
+             ON CONFLICT(local_path) DO UPDATE SET
+                started_at = excluded.started_at",
+            params![local_path, now],
+        )?;
+        Ok(())
+    }
+
+    /// Drop the in-progress row for `local_path`. Idempotent.
+    pub fn clear_sync_in_progress(&self, local_path: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM sync_in_progress WHERE local_path = ?1",
+            params![local_path],
+        )?;
+        Ok(())
+    }
+
+    /// Currently-syncing local paths. The Nautilus extension reads this
+    /// (with a small TTL cache) on every `update_file_info` to decide
+    /// whether to paint the syncing emblem.
+    pub fn list_sync_in_progress(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT local_path FROM sync_in_progress")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 
     /// Every rule the GUI knows about, ordered by local_path so callers
@@ -295,6 +350,38 @@ mod tests {
         assert_eq!(r.threshold_mb, 250);
         assert!(r.expand_subfolders);
         assert!(r.created_at > 0, "created_at should be a real timestamp");
+    }
+
+    // ----- sync_in_progress CRUD -----
+
+    #[test]
+    fn sync_in_progress_starts_empty() {
+        let db = fresh_db();
+        assert!(db.list_sync_in_progress().unwrap().is_empty());
+    }
+
+    #[test]
+    fn sync_in_progress_mark_and_clear() {
+        let db = fresh_db();
+        db.mark_sync_in_progress("/p/a").unwrap();
+        db.mark_sync_in_progress("/p/b").unwrap();
+        let mut rows = db.list_sync_in_progress().unwrap();
+        rows.sort();
+        assert_eq!(rows, vec!["/p/a".to_string(), "/p/b".to_string()]);
+        db.clear_sync_in_progress("/p/a").unwrap();
+        assert_eq!(db.list_sync_in_progress().unwrap(), vec!["/p/b".to_string()]);
+        // Clearing a never-marked path is a no-op, not an error.
+        db.clear_sync_in_progress("/never/tracked").unwrap();
+    }
+
+    #[test]
+    fn sync_in_progress_mark_is_idempotent() {
+        // Two consecutive marks on the same path leave one row, not
+        // a UNIQUE-constraint failure.
+        let db = fresh_db();
+        db.mark_sync_in_progress("/p").unwrap();
+        db.mark_sync_in_progress("/p").unwrap();
+        assert_eq!(db.list_sync_in_progress().unwrap().len(), 1);
     }
 
     #[test]

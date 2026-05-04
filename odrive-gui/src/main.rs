@@ -70,6 +70,17 @@ fn needs_wizard(agent: &OdriveAgent) -> bool {
 fn present_dashboard(app: &Application) {
     let agent = Rc::new(OdriveAgent::new());
 
+    // Sweep stale `sync_in_progress` rows. If the GUI was killed
+    // mid-sync, the worker thread died with it but the row remains;
+    // without this, the syncing emblem would persist forever on the
+    // affected folder. Clearing here is safe because no in-flight
+    // worker can exist before this point in the new process.
+    if let Ok(db) = OdriveDb::open(agent.get_db_path()) {
+        for path in db.list_sync_in_progress().unwrap_or_default() {
+            let _ = db.clear_sync_in_progress(&path);
+        }
+    }
+
     let nav = NavigationView::new();
     let overlay = ToastOverlay::new();
     overlay.set_child(Some(&nav));

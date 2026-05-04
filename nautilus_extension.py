@@ -1,8 +1,55 @@
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
+import time
 from gi.repository import Nautilus, GObject
+
+
+# Cross-process sync state. The GUI inserts a row before kicking off a
+# folder-level `odrive sync` and deletes it on completion (see
+# `OdriveDb::mark_sync_in_progress` / `clear_sync_in_progress`). Reading
+# this on every `update_file_info` would hammer SQLite, so we cache the
+# set with a short TTL — the GUI also touches the folder's mtime on
+# mark/clear which forces Nautilus to re-call us, so the emblem
+# transition feels immediate without us polling aggressively.
+_SYNC_DB_PATH = os.path.expanduser('~/.odrive-linux.db')
+_SYNC_CACHE_TTL = 0.5  # seconds
+_sync_cache = {'set': frozenset(), 'expires': 0.0}
+
+
+def _sync_in_progress_set():
+    now = time.monotonic()
+    if now < _sync_cache['expires']:
+        return _sync_cache['set']
+    paths = frozenset()
+    try:
+        # Open read-only via URI form so we never accidentally lock the
+        # DB or create a stale file when ~/.odrive-linux.db doesn't yet
+        # exist.
+        uri = f'file:{_SYNC_DB_PATH}?mode=ro'
+        with sqlite3.connect(uri, uri=True, timeout=0.2) as conn:
+            cur = conn.execute('SELECT local_path FROM sync_in_progress')
+            paths = frozenset(row[0] for row in cur.fetchall())
+    except sqlite3.Error:
+        pass  # DB missing / locked / table not yet migrated → empty set.
+    _sync_cache['set'] = paths
+    _sync_cache['expires'] = now + _SYNC_CACHE_TTL
+    return paths
+
+
+def _strip_placeholder_suffix(path):
+    """Mirror `odrive-cli`'s strip — the GUI marks the conceptual
+    folder path (no suffix) but during expand the on-disk entry is
+    still `<path>.cloudf`. Strip it before checking the in-progress
+    set so the syncing emblem appears on the placeholder too.
+    """
+    if path.endswith('.cloudf'):
+        return path[: -len('.cloudf')]
+    if path.endswith('.cloud'):
+        return path[: -len('.cloud')]
+    return path
 
 
 def _find_cli():
@@ -157,9 +204,21 @@ class OdriveExtension(GObject.GObject, Nautilus.MenuProvider, Nautilus.InfoProvi
         if path is None:
             return Nautilus.OperationResult.COMPLETE
 
-        if name.endswith('.cloud') or name.endswith('.cloudf'):
+        is_placeholder = name.endswith('.cloud') or name.endswith('.cloudf')
+
+        if is_placeholder:
             self._maybe_pad_placeholder(file)
-        else:
+
+        # Syncing emblem wins over the static synced/none state — when
+        # a folder is mid-`odrive sync` we want users to see *that*,
+        # not the prior synced badge. The GUI marks the conceptual
+        # folder path (no .cloudf suffix), so strip before checking.
+        in_progress = _sync_in_progress_set()
+        if in_progress and _strip_placeholder_suffix(path) in in_progress:
+            file.add_emblem('odrive-syncing')
+            return Nautilus.OperationResult.COMPLETE
+
+        if not is_placeholder:
             in_mount = any(path.startswith(m) for m in self.mounts)
             is_mount_root = path in self.mounts
             if in_mount and not is_mount_root:
