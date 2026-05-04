@@ -17,6 +17,7 @@
 //! has no foldersyncrule remove command, so we set the threshold to
 //! `0` (= never auto-download for this folder) and drop the row from
 //! our own `folder_sync_rules` table.
+use crate::worker;
 use libadwaita as adw;
 use adw::prelude::*;
 use adw::gtk as gtk;
@@ -26,7 +27,7 @@ use adw::{
     Toast, ToastOverlay, ToolbarView,
 };
 use gtk::{Align, Button, Entry, Image, Label, StringList};
-use odrive_core::{FolderRule, FolderSyncThreshold, OdriveAgent, OdriveDb};
+use odrive_core::{FolderRule, FolderSyncThreshold, OdriveAgent, OdriveDb, OdriveError};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -111,7 +112,13 @@ struct PageState {
 /// as the toolbar's content, replacing whatever was there before.
 fn render_into_toolbar(state: &Rc<PageState>) {
     let path = Path::new(&state.folder_path);
-    let needs_expansion = state.is_mount_root && !appears_expanded(path);
+    // Two distinct "needs expansion" cases: (1) the folder exists as
+    // a real directory but its contents are all `.cloudf` placeholders
+    // — typical mount-root first-open state; (2) the folder isn't a
+    // real directory at all because there's a sibling `.cloudf` taking
+    // its place — happens when a user unsyncs a folder and then
+    // re-navigates back into it.
+    let needs_expansion = !path.is_dir() || (state.is_mount_root && !appears_expanded(path));
 
     if needs_expansion {
         state.toolbar.set_content(Some(&first_time_setup_widget(state)));
@@ -128,11 +135,10 @@ fn render_into_toolbar(state: &Rc<PageState>) {
     }
 }
 
-/// Heuristic: a mount root is "expanded" iff at least one direct child
-/// is a real directory, OR a non-`.cloudf` file. Before
-/// `sync --recursive --nodownload` runs, the agent populates the mount
-/// with `.cloudf` placeholder files only; after, those become real
-/// directories.
+/// True iff a real directory has at least one child that's either a real
+/// subdirectory or a non-`.cloudf` file. Used only when the path is
+/// already known to be a real directory — otherwise the caller treats
+/// the folder as unexpanded by definition.
 fn appears_expanded(path: &Path) -> bool {
     let Ok(entries) = fs::read_dir(path) else {
         return false;
@@ -149,6 +155,18 @@ fn appears_expanded(path: &Path) -> bool {
         }
     }
     false
+}
+
+/// If a `.cloudf` placeholder exists at `<folder_path>.cloudf`, return
+/// that placeholder path. Used to drive an `odrive sync` that
+/// re-materialises an unsynced folder back into a real directory.
+fn placeholder_path(folder_path: &str) -> Option<String> {
+    let cloudf = format!("{}.cloudf", folder_path);
+    if Path::new(&cloudf).exists() {
+        Some(cloudf)
+    } else {
+        None
+    }
 }
 
 fn first_time_setup_widget(state: &Rc<PageState>) -> StatusPage {
@@ -170,25 +188,38 @@ fn first_time_setup_widget(state: &Rc<PageState>) -> StatusPage {
     {
         let state = state.clone();
         expand_btn.connect_clicked(move |btn| {
-            // Synchronous on the GTK thread for now (matches the
-            // wizard's install-download trade-off). Mounts with a
-            // few thousand entries take seconds.
             btn.set_sensitive(false);
             btn.set_label("Expanding…");
-            let result = state.agent.sync_recursive(&state.folder_path, true);
-            btn.set_sensitive(true);
-            btn.set_label("Expand placeholders");
-            match result {
-                Ok(_) => {
-                    state.overlay.add_toast(Toast::new("Placeholders expanded"));
-                    render_into_toolbar(&state);
-                }
-                Err(e) => {
-                    state
-                        .overlay
-                        .add_toast(Toast::new(&format!("Expansion failed: {}", e)));
-                }
-            }
+            // Two expansion paths:
+            //   - Folder is a real dir with only .cloudf children →
+            //     sync the folder itself recursively without download.
+            //   - Folder is gone, replaced by a sibling .cloudf
+            //     placeholder → sync that placeholder file. After
+            //     it succeeds the agent recreates the directory at
+            //     state.folder_path.
+            let target = placeholder_path(&state.folder_path)
+                .unwrap_or_else(|| state.folder_path.clone());
+            let agent_for_worker = state.agent.as_ref().clone();
+            let state_for_done = state.clone();
+            let btn_for_done = btn.clone();
+            worker::spawn(
+                move || agent_for_worker.sync_recursive(&target, true),
+                move |result: Result<String, OdriveError>| {
+                    btn_for_done.set_sensitive(true);
+                    btn_for_done.set_label("Expand placeholders");
+                    match result {
+                        Ok(_) => {
+                            state_for_done
+                                .overlay
+                                .add_toast(Toast::new("Placeholders expanded"));
+                            render_into_toolbar(&state_for_done);
+                        }
+                        Err(e) => state_for_done
+                            .overlay
+                            .add_toast(Toast::new(&format!("Expansion failed: {}", e))),
+                    }
+                },
+            );
         });
     }
 
@@ -212,53 +243,95 @@ fn build_subfolders_group(state: &Rc<PageState>) -> PreferencesGroup {
     group
 }
 
-/// Names of direct subfolders, sorted alphabetically. We deliberately
-/// skip files (the per-folder rule UI applies only to folders, and the
-/// agent's `foldersyncrule` likewise) and dotfiles.
-fn list_subfolders(path: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
+
+/// One subfolder candidate to render in the parent's list.
+struct SubfolderEntry {
+    /// Path the user navigates to on click — never includes the
+    /// `.cloudf` extension. For an unexpanded folder this points at a
+    /// directory that doesn't exist yet; the detail page detects that
+    /// and offers an Expand button which calls sync on the placeholder.
+    target_path: PathBuf,
+    /// True iff the entry is an unexpanded `.cloudf` placeholder rather
+    /// than a real directory.
+    unexpanded: bool,
+}
+
+/// Direct subfolders to render, sorted alphabetically. Includes both
+/// real directories and `.cloudf` placeholder files (treated as
+/// unexpanded folders) — without the latter, a folder the user unsyncs
+/// silently disappears from its parent's list, since unsync collapses
+/// the directory back to a `.cloudf`.
+fn list_subfolders(path: &Path) -> Vec<SubfolderEntry> {
+    let mut out: Vec<SubfolderEntry> = Vec::new();
     let Ok(entries) = fs::read_dir(path) else {
         return out;
     };
     for entry in entries.flatten() {
         let p = entry.path();
-        if !p.is_dir() {
+        let name = match p.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if name.starts_with('.') {
             continue;
         }
-        if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-            if name.starts_with('.') {
-                continue;
-            }
+        if p.is_dir() {
+            out.push(SubfolderEntry {
+                target_path: p,
+                unexpanded: false,
+            });
+        } else if name.ends_with(".cloudf") {
+            // Strip the `.cloudf` suffix so the click handler navigates
+            // to the directory path the agent will produce after sync.
+            let stem = &name[..name.len() - ".cloudf".len()];
+            let target = p.parent().map(|par| par.join(stem)).unwrap_or(p);
+            out.push(SubfolderEntry {
+                target_path: target,
+                unexpanded: true,
+            });
         }
-        out.push(p);
     }
-    out.sort();
+    out.sort_by(|a, b| a.target_path.cmp(&b.target_path));
     out
 }
 
-fn build_subfolder_row(state: &Rc<PageState>, sub: &Path) -> ActionRow {
+fn build_subfolder_row(state: &Rc<PageState>, sub: &SubfolderEntry) -> ActionRow {
     let name = sub
+        .target_path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| sub.to_string_lossy().into_owned());
+        .unwrap_or_else(|| sub.target_path.to_string_lossy().into_owned());
 
     let row = ActionRow::builder()
         .title(&name)
         .activatable(true)
         .build();
 
-    // Match the dashboard's mount-row treatment so the icon sits a bit
-    // off the left edge and there's a real gap before the title.
-    let icon = Image::from_icon_name("folder-symbolic");
+    // Different leading icon for unexpanded vs expanded folders so the
+    // user can tell at a glance which ones still need a sync.
+    let icon_name = if sub.unexpanded {
+        "folder-download-symbolic"
+    } else {
+        "folder-symbolic"
+    };
+    let icon = Image::from_icon_name(icon_name);
     icon.set_pixel_size(20);
     icon.set_margin_start(6);
     icon.set_margin_end(8);
     row.add_prefix(&icon);
 
-    // Mark with a "rule set" badge if there's a folder rule for this
-    // path in our DB. Caption-styled and dimmed.
-    if let Some(db) = open_db(&state.agent) {
-        if let Ok(Some(rule)) = db.get_folder_rule(&sub.to_string_lossy()) {
+    // "Not synced" caption for unexpanded folders sets expectation
+    // that clicking will require an expand step. Otherwise show a
+    // rule badge if a per-folder rule is set in our DB.
+    let target_str = sub.target_path.to_string_lossy().into_owned();
+    if sub.unexpanded {
+        let badge = Label::new(Some("Not synced"));
+        badge.add_css_class("dim-label");
+        badge.add_css_class("caption");
+        badge.set_margin_end(6);
+        row.add_suffix(&badge);
+    } else if let Some(db) = open_db(&state.agent) {
+        if let Ok(Some(rule)) = db.get_folder_rule(&target_str) {
             let badge = Label::new(Some(&format_rule_badge(&rule)));
             badge.add_css_class("dim-label");
             badge.add_css_class("caption");
@@ -273,13 +346,13 @@ fn build_subfolder_row(state: &Rc<PageState>, sub: &Path) -> ActionRow {
 
     {
         let state = state.clone();
-        let sub = sub.to_path_buf();
+        let target = target_str.clone();
         row.connect_activated(move |_| {
             let page = build_page(
                 state.agent.clone(),
                 state.overlay.clone(),
                 state.nav.clone(),
-                sub.to_string_lossy().into_owned(),
+                target.clone(),
                 false,
             );
             state.nav.push(&page);
@@ -498,15 +571,23 @@ fn build_rule_group(state: &Rc<PageState>) -> PreferencesGroup {
         sync_now_btn.connect_clicked(move |btn| {
             btn.set_sensitive(false);
             btn.set_label("Syncing…");
-            let result = state.agent.sync_recursive(&state.folder_path, false);
-            btn.set_sensitive(true);
-            btn.set_label("Sync");
-            match result {
-                Ok(_) => state.overlay.add_toast(Toast::new("Sync started")),
-                Err(e) => state
-                    .overlay
-                    .add_toast(Toast::new(&format!("Sync failed: {}", e))),
-            }
+            let agent_for_worker = state.agent.as_ref().clone();
+            let path = state.folder_path.clone();
+            let state_for_done = state.clone();
+            let btn_for_done = btn.clone();
+            worker::spawn(
+                move || agent_for_worker.sync_recursive(&path, false),
+                move |result: Result<String, OdriveError>| {
+                    btn_for_done.set_sensitive(true);
+                    btn_for_done.set_label("Sync");
+                    match result {
+                        Ok(_) => state_for_done.overlay.add_toast(Toast::new("Sync complete")),
+                        Err(e) => state_for_done
+                            .overlay
+                            .add_toast(Toast::new(&format!("Sync failed: {}", e))),
+                    }
+                },
+            );
         });
     }
 
@@ -537,17 +618,18 @@ fn build_rule_group(state: &Rc<PageState>) -> PreferencesGroup {
             let threshold = choice.to_threshold(custom_mb);
             let expand = expand_row.is_active();
 
+            // foldersyncrule itself is a fast CLI call (no network IO),
+            // so we keep it on the main thread. The bundled sync that
+            // applies the rule to existing files moves to a worker
+            // thread — that's the long-running step.
             btn.set_sensitive(false);
-            let label_before = btn.label().map(|s| s.to_string()).unwrap_or_default();
             btn.set_label("Saving…");
-            let agent_result =
+            let rule_result =
                 state
                     .agent
                     .folder_sync_rule(&state.folder_path, threshold, expand);
-            btn.set_sensitive(true);
-            btn.set_label(&label_before);
 
-            match agent_result {
+            match rule_result {
                 Ok(_) => {
                     if let Some(db) = open_db(&state.agent) {
                         if let Err(e) = db.upsert_folder_rule(
@@ -561,12 +643,56 @@ fn build_rule_group(state: &Rc<PageState>) -> PreferencesGroup {
                             )));
                         }
                     }
-                    state.overlay.add_toast(Toast::new("Folder rule saved"));
-                    render_into_toolbar(&state);
+
+                    // foldersyncrule applies to *new* remote content
+                    // only (per upstream docs: "Set rule for automatically
+                    // syncing new remote content"). Existing local
+                    // placeholders won't materialise unless we also run
+                    // a sync. Bundle a sync_recursive on a worker
+                    // thread so the GUI stays responsive. Skip when
+                    // threshold == None since the rule means "don't
+                    // auto-download anything" and the sync would be a
+                    // no-op.
+                    if threshold == FolderSyncThreshold::None {
+                        btn.set_sensitive(true);
+                        btn.set_label("Save");
+                        state.overlay.add_toast(Toast::new("Folder rule saved"));
+                        render_into_toolbar(&state);
+                    } else {
+                        // Rule itself is set instantly upstream; the
+                        // background sync that materialises existing
+                        // content runs on the worker. Showing "Applied"
+                        // (past tense, button still disabled) signals
+                        // "your save took effect" — the user doesn't
+                        // need to wait. The follow-up toast on sync
+                        // completion announces the bundled apply.
+                        btn.set_label("Applied");
+                        let agent_for_worker = state.agent.as_ref().clone();
+                        let path = state.folder_path.clone();
+                        let state_for_done = state.clone();
+                        worker::spawn(
+                            move || agent_for_worker.sync_recursive(&path, false),
+                            move |result: Result<String, OdriveError>| {
+                                let toast = match result {
+                                    Ok(_) => "Rule saved and applied to existing files".to_string(),
+                                    Err(e) => format!(
+                                        "Rule saved; sync of existing files failed: {}",
+                                        e
+                                    ),
+                                };
+                                state_for_done.overlay.add_toast(Toast::new(&toast));
+                                render_into_toolbar(&state_for_done);
+                            },
+                        );
+                    }
                 }
-                Err(e) => state
-                    .overlay
-                    .add_toast(Toast::new(&format!("Save failed: {}", e))),
+                Err(e) => {
+                    btn.set_sensitive(true);
+                    btn.set_label("Save");
+                    state
+                        .overlay
+                        .add_toast(Toast::new(&format!("Save failed: {}", e)));
+                }
             }
         });
     }
@@ -578,7 +704,7 @@ fn confirm_delete_rule(button: &Button, state: Rc<PageState>) {
     let dialog = MessageDialog::builder()
         .heading("Remove sync rule?")
         .body(format!(
-            "This sets the auto-download threshold for {} to 0 and forgets the rule. Existing local files stay in place.",
+            "This sets the auto-download threshold for {} to 0 and forgets the rule.",
             state.folder_path
         ))
         .modal(true)
@@ -589,25 +715,68 @@ fn confirm_delete_rule(button: &Button, state: Rc<PageState>) {
     {
         dialog.set_transient_for(Some(&window));
     }
+
+    // Optional cleanup toggle: revert every file in the folder back
+    // to a `.cloud` placeholder, freeing local disk space. Off by
+    // default — deleting a rule and unsyncing files are different
+    // intents and we don't want to silently delete local content.
+    let unsync_switch = adw::SwitchRow::builder()
+        .title("Also unsync local files")
+        .subtitle("Revert files in this folder to placeholders, freeing local disk space")
+        .active(false)
+        .build();
+    let unsync_group = PreferencesGroup::new();
+    unsync_group.add(&unsync_switch);
+    dialog.set_extra_child(Some(&unsync_group));
+
     dialog.add_response("cancel", "Cancel");
     dialog.add_response("delete", "Delete");
     dialog.set_response_appearance("delete", ResponseAppearance::Destructive);
     dialog.set_default_response(Some("cancel"));
     dialog.set_close_response("cancel");
 
+    let unsync_switch_for_cb = unsync_switch.clone();
     dialog.connect_response(None, move |dlg, response| {
         if response == "delete" {
-            let agent_result =
-                state
-                    .agent
-                    .folder_sync_rule(&state.folder_path, FolderSyncThreshold::None, false);
-            match agent_result {
+            let also_unsync = unsync_switch_for_cb.is_active();
+            // Rule removal itself is fast — keep it on the main
+            // thread. The optional unsync moves to a worker since it
+            // can take a while on a large folder.
+            let rule_result = state.agent.folder_sync_rule(
+                &state.folder_path,
+                FolderSyncThreshold::None,
+                false,
+            );
+            match rule_result {
                 Ok(_) => {
                     if let Some(db) = open_db(&state.agent) {
                         let _ = db.delete_folder_rule(&state.folder_path);
                     }
-                    state.overlay.add_toast(Toast::new("Folder rule removed"));
-                    render_into_toolbar(&state);
+                    if also_unsync {
+                        state.overlay.add_toast(Toast::new(
+                            "Rule removed — unsyncing local files…",
+                        ));
+                        let agent_for_worker = state.agent.as_ref().clone();
+                        let path = state.folder_path.clone();
+                        let state_for_done = state.clone();
+                        worker::spawn(
+                            move || agent_for_worker.unsync(&path),
+                            move |result: Result<String, OdriveError>| {
+                                match result {
+                                    Ok(_) => state_for_done
+                                        .overlay
+                                        .add_toast(Toast::new("Local files unsynced")),
+                                    Err(e) => state_for_done.overlay.add_toast(Toast::new(
+                                        &format!("Rule removed; unsync failed: {}", e),
+                                    )),
+                                }
+                                render_into_toolbar(&state_for_done);
+                            },
+                        );
+                    } else {
+                        state.overlay.add_toast(Toast::new("Folder rule removed"));
+                        render_into_toolbar(&state);
+                    }
                 }
                 Err(e) => state
                     .overlay

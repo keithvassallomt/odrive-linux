@@ -25,7 +25,8 @@ use adw::{
 use gtk::{
     gio, glib, Align, Application, Box as GtkBox, Button, FileDialog, Orientation,
 };
-use odrive_core::{OdriveAgent, OdriveConfig};
+use crate::worker;
+use odrive_core::{OdriveAgent, OdriveConfig, OdriveError};
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
@@ -178,20 +179,31 @@ fn install_page(
         install_btn.connect_clicked(move |btn| {
             btn.set_sensitive(false);
             btn.set_label("Installing… (this may take a moment)");
-            // Synchronous — UI freezes for the duration. See module-level
-            // doc for the worker-thread upgrade path.
-            let result = agent.borrow().install_official();
-            btn.set_sensitive(true);
-            btn.set_label("Install for me");
-            match result {
-                Ok(_) => {
-                    overlay.add_toast(Toast::new("odrive installed"));
-                    push_next(&nav, &agent, &overlay, &window);
-                }
-                Err(e) => {
-                    overlay.add_toast(Toast::new(&format!("Install failed: {}", e)));
-                }
-            }
+            // Move the install pipeline to a worker thread so the GTK
+            // main loop keeps painting during the curl+tar run.
+            let agent_for_worker = agent.borrow().clone();
+            let nav_for_done = nav.clone();
+            let agent_for_done = agent.clone();
+            let overlay_for_done = overlay.clone();
+            let window_for_done = window.clone();
+            let btn_for_done = btn.clone();
+            worker::spawn(
+                move || agent_for_worker.install_official(),
+                move |result: Result<(), OdriveError>| {
+                    btn_for_done.set_sensitive(true);
+                    btn_for_done.set_label("Install for me");
+                    match result {
+                        Ok(_) => {
+                            overlay_for_done.add_toast(Toast::new("odrive installed"));
+                            push_next(&nav_for_done, &agent_for_done, &overlay_for_done, &window_for_done);
+                        }
+                        Err(e) => {
+                            overlay_for_done
+                                .add_toast(Toast::new(&format!("Install failed: {}", e)));
+                        }
+                    }
+                },
+            );
         });
     }
 

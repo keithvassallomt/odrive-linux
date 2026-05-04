@@ -1,6 +1,7 @@
 mod mount_detail;
 mod settings_page;
 mod wizard;
+mod worker;
 
 use libadwaita as adw;
 use adw::prelude::*;
@@ -315,15 +316,30 @@ fn build_dashboard_page(
         let agent = agent.clone();
         let update = update_ui.clone();
         let overlay = overlay.clone();
-        move |_| {
+        move |btn| {
+            btn.set_sensitive(false);
+            btn.set_label("Scanning…");
+            let agent_for_worker = agent.as_ref().clone();
             let mount_path = agent.default_mount_path();
-            match agent.scan_placeholders(&mount_path) {
-                Ok(count) => {
-                    overlay.add_toast(Toast::new(&format!("Found {} placeholders", count)));
-                    update();
-                }
-                Err(e) => overlay.add_toast(Toast::new(&format!("Scan failed: {}", e))),
-            }
+            let overlay_for_done = overlay.clone();
+            let update_for_done = update.clone();
+            let btn_for_done = btn.clone();
+            worker::spawn(
+                move || agent_for_worker.scan_placeholders(&mount_path),
+                move |result| {
+                    btn_for_done.set_sensitive(true);
+                    btn_for_done.set_label("Scan now");
+                    match result {
+                        Ok(count) => {
+                            overlay_for_done
+                                .add_toast(Toast::new(&format!("Found {} placeholders", count)));
+                            update_for_done();
+                        }
+                        Err(e) => overlay_for_done
+                            .add_toast(Toast::new(&format!("Scan failed: {}", e))),
+                    }
+                },
+            );
         }
     });
 
