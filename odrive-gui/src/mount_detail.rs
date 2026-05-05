@@ -491,14 +491,24 @@ impl ThresholdChoice {
 }
 
 fn build_rule_group(state: &Rc<PageState>) -> PreferencesGroup {
-    let group = PreferencesGroup::builder()
-        .title("Sync rule")
-        .description("How files in this folder should sync.")
-        .build();
-
     let existing_rule = open_db(&state.agent)
         .and_then(|db| db.get_folder_rule(&state.folder_path).ok().flatten());
     let has_rule = existing_rule.is_some();
+    let is_paused = existing_rule.as_ref().map(|r| r.is_paused()).unwrap_or(false);
+
+    // Title and description carry the paused signal — same idiom as
+    // GNOME Settings groups that flip subtitle copy when a feature is
+    // disabled. Saving a paused rule via the Update button below
+    // re-activates it (upsert clears the paused state).
+    let group = PreferencesGroup::builder()
+        .title(if is_paused { "Sync rule (paused)" } else { "Sync rule" })
+        .description(if is_paused {
+            "This rule is paused — odrive won't auto-download files until you resume. \
+             Saving with the Update button below resumes and applies the new threshold."
+        } else {
+            "How files in this folder should sync."
+        })
+        .build();
 
     let operation = ComboRow::builder()
         .title("Operation")
@@ -508,10 +518,19 @@ fn build_rule_group(state: &Rc<PageState>) -> PreferencesGroup {
     operation.set_selected(0);
     group.add(&operation);
 
+    // For a paused rule, the live `threshold_mb` is `0` (= never
+    // download). That's not what the user set — `paused_threshold_mb`
+    // holds the value they'd resume to. Show *that* in the threshold
+    // combo so the editor reflects the rule the user actually
+    // configured, not the suspended-state placeholder.
+    let effective_threshold_mb = existing_rule
+        .as_ref()
+        .map(|r| r.paused_threshold_mb.unwrap_or(r.threshold_mb))
+        .unwrap_or(0);
     let (initial_choice, initial_custom_mb) = match &existing_rule {
-        Some(r) => {
-            ThresholdChoice::from_threshold(FolderSyncThreshold::from_db_value(r.threshold_mb))
-        }
+        Some(_) => ThresholdChoice::from_threshold(
+            FolderSyncThreshold::from_db_value(effective_threshold_mb),
+        ),
         None => (ThresholdChoice::All, None),
     };
 
@@ -564,12 +583,53 @@ fn build_rule_group(state: &Rc<PageState>) -> PreferencesGroup {
     sync_now_row.set_visible(false);
     group.add(&sync_now_row);
 
-    // Save / Delete row (Automatic-only).
+    // Pause / Resume row (Automatic-only, shows only when a rule
+    // exists). Reversible action so no confirmation dialog. When the
+    // rule is paused, this row is the primary affordance and the
+    // button takes the suggested-action style; when active, it's a
+    // secondary "snooze" action above Save.
+    let pause_row = ActionRow::builder()
+        .title(if is_paused { "Resume rule" } else { "Pause rule" })
+        .subtitle(if is_paused {
+            "Re-apply this rule using its saved threshold"
+        } else {
+            "Stop auto-downloads here without losing the rule"
+        })
+        .build();
+    let pause_btn = Button::builder()
+        .label(if is_paused { "Resume" } else { "Pause" })
+        .valign(Align::Center)
+        .build();
+    pause_btn.add_css_class("pill");
+    if is_paused {
+        pause_btn.add_css_class("suggested-action");
+    }
+    pause_row.add_suffix(&pause_btn);
+    if has_rule {
+        group.add(&pause_row);
+    }
+
+    // Save / Delete row (Automatic-only). Label flips to "Update &
+    // resume" when the rule is paused — Save's semantic is "this is
+    // the rule I want active right now", which means clearing the
+    // paused state is part of the action.
     let save_row = ActionRow::builder()
-        .title(if has_rule { "Update rule" } else { "Save rule" })
+        .title(if !has_rule {
+            "Save rule"
+        } else if is_paused {
+            "Update & resume rule"
+        } else {
+            "Update rule"
+        })
         .build();
     let save_btn = Button::builder()
-        .label(if has_rule { "Update" } else { "Save" })
+        .label(if !has_rule {
+            "Save"
+        } else if is_paused {
+            "Update & resume"
+        } else {
+            "Update"
+        })
         .valign(Align::Center)
         .build();
     save_btn.add_css_class("pill");
@@ -591,13 +651,28 @@ fn build_rule_group(state: &Rc<PageState>) -> PreferencesGroup {
     }
     group.add(&save_row);
 
+    if has_rule {
+        let state_for_pause = state.clone();
+        pause_btn.connect_clicked(move |_btn| {
+            crate::toggle_pause(
+                &state_for_pause.agent,
+                &state_for_pause.overlay,
+                &state_for_pause.folder_path,
+            );
+            render_into_toolbar(&state_for_pause);
+        });
+    }
+
     // Operation toggle controls visibility of the rest of the rows.
+    // Pause row is conditional on `has_rule` — it only ever exists
+    // (and was added to the group) when there's a rule to pause.
     {
         let threshold_row = threshold_row.clone();
         let custom_row = custom_row.clone();
         let expand_row = expand_row.clone();
         let sync_now_row = sync_now_row.clone();
         let save_row = save_row.clone();
+        let pause_row = pause_row.clone();
         operation.connect_selected_notify(move |op| {
             let automatic = op.selected() == 0;
             threshold_row.set_visible(automatic);
@@ -610,6 +685,7 @@ fn build_rule_group(state: &Rc<PageState>) -> PreferencesGroup {
             );
             expand_row.set_visible(automatic);
             save_row.set_visible(automatic);
+            pause_row.set_visible(automatic && has_rule);
             sync_now_row.set_visible(!automatic);
         });
     }

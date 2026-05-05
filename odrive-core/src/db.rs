@@ -169,6 +169,9 @@ impl OdriveDb {
     /// expand_subfolders if one already exists. `created_at` is set
     /// to the current unix timestamp on insert and left untouched on
     /// update (so we can show "rule set on …" in the GUI later).
+    /// Always sets `paused_threshold_mb` to NULL — pressing Save in
+    /// the editor commits to "this rule is active right now". Users
+    /// who want to pause re-do it with the explicit Pause action.
     pub fn upsert_folder_rule(
         &self,
         local_path: &str,
@@ -180,11 +183,13 @@ impl OdriveDb {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         self.conn.execute(
-            "INSERT INTO folder_sync_rules (local_path, threshold_mb, expand_subfolders, created_at)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO folder_sync_rules
+                (local_path, threshold_mb, expand_subfolders, created_at, paused_threshold_mb)
+             VALUES (?1, ?2, ?3, ?4, NULL)
              ON CONFLICT(local_path) DO UPDATE SET
                 threshold_mb = excluded.threshold_mb,
-                expand_subfolders = excluded.expand_subfolders",
+                expand_subfolders = excluded.expand_subfolders,
+                paused_threshold_mb = NULL",
             params![local_path, threshold_mb, expand_subfolders, now],
         )?;
         Ok(())
@@ -521,6 +526,28 @@ mod tests {
         );
         db.resume_folder_rule("/p").unwrap();
         assert_eq!(db.get_folder_rule("/p").unwrap().unwrap().threshold_mb, -1);
+    }
+
+    #[test]
+    fn upsert_clears_paused_state_when_saving_a_paused_rule() {
+        // Editor's "Update & resume" path: user pauses a rule, then
+        // edits it and presses Save. Upsert must clear the paused
+        // stash — pressing Save commits to "this is the active rule
+        // right now". Otherwise the rule would round-trip back to
+        // paused on the next render.
+        let db = fresh_db();
+        db.upsert_folder_rule("/p", 100, false).unwrap();
+        db.pause_folder_rule("/p").unwrap();
+        assert_eq!(
+            db.get_folder_rule("/p").unwrap().unwrap().paused_threshold_mb,
+            Some(100)
+        );
+
+        db.upsert_folder_rule("/p", 250, true).unwrap();
+        let r = db.get_folder_rule("/p").unwrap().unwrap();
+        assert_eq!(r.threshold_mb, 250);
+        assert_eq!(r.paused_threshold_mb, None);
+        assert!(!r.is_paused());
     }
 
     #[test]

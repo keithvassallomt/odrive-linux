@@ -583,7 +583,10 @@ fn push_folder_page(
 /// surfaces as a toast but the local state still flipped). When
 /// resuming, we restore the prior `expand_subfolders` from the DB row
 /// — pausing preserves it so resume hits the same upstream shape.
-fn toggle_pause(agent: &Rc<OdriveAgent>, overlay: &ToastOverlay, path: &str) {
+///
+/// Shared between the Sync Rules listing on Mount & Sync and the
+/// per-folder rule editor in `mount_detail`.
+pub(crate) fn toggle_pause(agent: &Rc<OdriveAgent>, overlay: &ToastOverlay, path: &str) {
     let db = match OdriveDb::open(agent.get_db_path()) {
         Ok(d) => d,
         Err(e) => {
