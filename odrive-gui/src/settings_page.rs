@@ -214,25 +214,78 @@ fn build_appearance_page(overlay: &ToastOverlay, tray: &Rc<TrayController>) -> P
     let page = PreferencesPage::new();
     page.set_margin_top(12);
 
+    let cfg = OdriveConfig::load();
+
+    // ----- Panel indicator -----
     // Tray-icon colour. The icons are installed by `odrive-cli
     // install-handlers` into hicolor's `status` category as
     // `odrive-tray-<color>`. Selection persists to
     // ~/.config/odrive-linux/config.toml; the change applies live to
     // the running indicator via TrayController and is picked up at the
     // next process start when the GUI launches without an active tray.
-    let appearance = PreferencesGroup::builder()
+    let panel_group = PreferencesGroup::builder()
         .title("Panel indicator")
         .description("How the tray icon renders.")
         .build();
-
-    let cfg = OdriveConfig::load();
     let tray_row = build_tray_color_row(&cfg.tray_icon_color);
-    appearance.add(&tray_row);
-    page.add(&appearance);
-
+    panel_group.add(&tray_row);
+    page.add(&panel_group);
     wire_tray_color(&tray_row, overlay.clone(), tray.clone());
 
+    // ----- Nautilus emblems -----
+    // The Python Nautilus extension paints two emblems: `odrive-synced`
+    // on files / folders covered by a sync rule, and `odrive-syncing`
+    // on entries currently mid-sync (rows in the `sync_in_progress`
+    // table). Both default on; the user can opt out of either
+    // independently. The extension reads the live config on each
+    // `update_file_info` (with its short TTL cache), so toggles take
+    // effect on the next directory listing — no Nautilus restart.
+    let emblems_group = PreferencesGroup::builder()
+        .title("Nautilus emblems")
+        .description("Emblems painted on file-manager entries.")
+        .build();
+    let synced_row = adw::SwitchRow::builder()
+        .title("Show synced emblem")
+        .subtitle("Files and folders covered by a sync rule")
+        .active(cfg.nautilus_synced_emblem)
+        .build();
+    let syncing_row = adw::SwitchRow::builder()
+        .title("Show syncing emblem")
+        .subtitle("Entries currently being synced")
+        .active(cfg.nautilus_syncing_emblem)
+        .build();
+    emblems_group.add(&synced_row);
+    emblems_group.add(&syncing_row);
+    page.add(&emblems_group);
+    wire_emblem_switch(&synced_row, EmblemKind::Synced, overlay.clone());
+    wire_emblem_switch(&syncing_row, EmblemKind::Syncing, overlay.clone());
+
     page
+}
+
+#[derive(Copy, Clone)]
+enum EmblemKind {
+    Synced,
+    Syncing,
+}
+
+/// Persist a Nautilus-emblem toggle to `OdriveConfig`. Surface a toast
+/// on save failure (config unwritable, etc.). The switch state itself
+/// stays at the user's selection regardless — they can retry by
+/// toggling again, and the Nautilus extension will read whatever's on
+/// disk on its next pass.
+fn wire_emblem_switch(row: &adw::SwitchRow, kind: EmblemKind, overlay: ToastOverlay) {
+    row.connect_active_notify(move |r| {
+        let active = r.is_active();
+        let mut cfg = OdriveConfig::load();
+        match kind {
+            EmblemKind::Synced => cfg.nautilus_synced_emblem = active,
+            EmblemKind::Syncing => cfg.nautilus_syncing_emblem = active,
+        }
+        if let Err(e) = cfg.save() {
+            overlay.add_toast(Toast::new(&format!("Could not save preference: {}", e)));
+        }
+    });
 }
 
 

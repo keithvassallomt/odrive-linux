@@ -58,6 +58,61 @@ def _folder_rule_set():
     return _db_cache['folder_rules']
 
 
+# Per-user emblem toggles, persisted by the GUI's Preferences →
+# Appearance page into ~/.config/odrive-linux/config.toml. Both default
+# True (= prior always-on behaviour) so an extension running ahead of
+# a Manager that's never been opened keeps painting emblems. Cached
+# briefly to avoid hitting the file on every update_file_info, but
+# short enough that a toggle takes effect within a directory tour.
+_CONFIG_PATH = os.path.expanduser('~/.config/odrive-linux/config.toml')
+_CONFIG_CACHE_TTL = 1.0  # seconds
+_config_cache = {'synced_emblem': True, 'syncing_emblem': True, 'expires': 0.0}
+
+
+def _parse_toml_bool(line):
+    """Parse `key = true` / `key = false`. Default True on anything we
+    don't recognise — a garbled value should keep the prior on-by-
+    default behaviour rather than silently turn the emblem off.
+    """
+    if '=' not in line:
+        return True
+    value = line.split('=', 1)[1].strip().lower()
+    if value.startswith('false'):
+        return False
+    return True
+
+
+def _refresh_config_cache():
+    """Reload the two emblem toggles. We don't pull in `tomllib` (3.11+
+    only) because the keys we care about are simple `key = bool` lines
+    a 5-line parser handles fine — and being permissive on TOML quirks
+    is exactly the wrong move here. Missing file → both True (defaults).
+    """
+    now = time.monotonic()
+    if now < _config_cache['expires']:
+        return
+    synced = True
+    syncing = True
+    try:
+        with open(_CONFIG_PATH, 'r', encoding='utf-8') as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped.startswith('nautilus_synced_emblem'):
+                    synced = _parse_toml_bool(stripped)
+                elif stripped.startswith('nautilus_syncing_emblem'):
+                    syncing = _parse_toml_bool(stripped)
+    except (OSError, IOError):
+        pass  # Missing / unreadable → defaults stand.
+    _config_cache['synced_emblem'] = synced
+    _config_cache['syncing_emblem'] = syncing
+    _config_cache['expires'] = now + _CONFIG_CACHE_TTL
+
+
+def _emblems_enabled():
+    _refresh_config_cache()
+    return _config_cache['synced_emblem'], _config_cache['syncing_emblem']
+
+
 def _strip_placeholder_suffix(path):
     """Mirror `odrive-cli`'s strip — the GUI marks the conceptual
     folder path (no suffix) but during expand the on-disk entry is
@@ -228,29 +283,35 @@ class OdriveExtension(GObject.GObject, Nautilus.MenuProvider, Nautilus.InfoProvi
         if is_placeholder:
             self._maybe_pad_placeholder(file)
 
+        synced_on, syncing_on = _emblems_enabled()
+
         # Syncing emblem wins over the static synced/none state — when
         # a folder is mid-`odrive sync` we want users to see *that*,
         # not the prior synced badge. The GUI marks the conceptual
         # folder path (no .cloudf suffix), so strip before checking.
+        # Even with the toggle off we still return early on a match so
+        # a synced emblem doesn't sneak through during a sync.
         in_progress = _sync_in_progress_set()
         if in_progress and _strip_placeholder_suffix(path) in in_progress:
-            file.add_emblem('odrive-syncing')
+            if syncing_on:
+                file.add_emblem('odrive-syncing')
             return Nautilus.OperationResult.COMPLETE
 
-        if file.is_directory():
-            # Directories don't get the synced emblem just because the
-            # `.cloudf` was expanded — their contents may still be
-            # placeholders, and badging the wrapper as "synced" would
-            # mislead. The exception is folders with an explicit
-            # sync rule set via the Manager: that rule promises the
-            # folder will be kept in sync, so the emblem is honest.
-            if path in _folder_rule_set():
-                file.add_emblem('odrive-synced')
-        elif not is_placeholder:
-            in_mount = any(path.startswith(m) for m in self.mounts)
-            is_mount_root = path in self.mounts
-            if in_mount and not is_mount_root:
-                file.add_emblem('odrive-synced')
+        if synced_on:
+            if file.is_directory():
+                # Directories don't get the synced emblem just because the
+                # `.cloudf` was expanded — their contents may still be
+                # placeholders, and badging the wrapper as "synced" would
+                # mislead. The exception is folders with an explicit
+                # sync rule set via the Manager: that rule promises the
+                # folder will be kept in sync, so the emblem is honest.
+                if path in _folder_rule_set():
+                    file.add_emblem('odrive-synced')
+            elif not is_placeholder:
+                in_mount = any(path.startswith(m) for m in self.mounts)
+                is_mount_root = path in self.mounts
+                if in_mount and not is_mount_root:
+                    file.add_emblem('odrive-synced')
         return Nautilus.OperationResult.COMPLETE
 
     def _maybe_pad_placeholder(self, file):

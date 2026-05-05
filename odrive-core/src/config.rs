@@ -25,6 +25,18 @@ pub struct OdriveConfig {
     /// render).
     #[serde(default = "default_tray_icon_color")]
     pub tray_icon_color: String,
+
+    /// Whether the Nautilus extension paints the `odrive-synced` emblem
+    /// on files / folders covered by a sync rule. Toggle in Preferences →
+    /// Appearance. Default true (matches the prior always-on behaviour).
+    #[serde(default = "default_true")]
+    pub nautilus_synced_emblem: bool,
+
+    /// Whether the Nautilus extension paints the `odrive-syncing` emblem
+    /// on entries currently being synced (rows in the
+    /// `sync_in_progress` table). Default true.
+    #[serde(default = "default_true")]
+    pub nautilus_syncing_emblem: bool,
 }
 
 fn home() -> String {
@@ -39,11 +51,17 @@ fn default_tray_icon_color() -> String {
     DEFAULT_TRAY_ICON_COLOR.to_string()
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl Default for OdriveConfig {
     fn default() -> Self {
         Self {
             agent_bin_dir: default_agent_bin_dir(),
             tray_icon_color: default_tray_icon_color(),
+            nautilus_synced_emblem: true,
+            nautilus_syncing_emblem: true,
         }
     }
 }
@@ -120,11 +138,27 @@ mod tests {
         let original = OdriveConfig {
             agent_bin_dir: "/opt/odrive/bin".to_string(),
             tray_icon_color: "white".to_string(),
+            nautilus_synced_emblem: false,
+            nautilus_syncing_emblem: true,
         };
         original.save_to(&path).expect("save");
         let loaded = OdriveConfig::load_from(&path);
         assert_eq!(loaded.agent_bin_dir, "/opt/odrive/bin");
         assert_eq!(loaded.tray_icon_color, "white");
+        assert!(!loaded.nautilus_synced_emblem);
+        assert!(loaded.nautilus_syncing_emblem);
+    }
+
+    #[test]
+    fn missing_nautilus_emblem_keys_default_to_true() {
+        // Older configs predating the emblem toggles must keep the prior
+        // always-on behaviour rather than silently turning emblems off.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "agent_bin_dir = \"/opt/odrive/bin\"\n").unwrap();
+        let cfg = OdriveConfig::load_from(&path);
+        assert!(cfg.nautilus_synced_emblem);
+        assert!(cfg.nautilus_syncing_emblem);
     }
 
     #[test]
