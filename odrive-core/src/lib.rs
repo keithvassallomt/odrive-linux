@@ -116,6 +116,69 @@ pub struct OdriveMount {
     pub status: String,
 }
 
+/// Compose the odrive web-app URL (`https://www.odrive.com/browse/<path>`)
+/// for a local filesystem path, using the supplied mount list to resolve
+/// which remote namespace the path belongs to. Pure: no I/O. Returns an
+/// error if `path` is not under any mount's `local_path` prefix.
+pub fn build_web_url(path: &str, mounts: &[OdriveMount]) -> Result<String, OdriveError> {
+    let trimmed = path.trim_end_matches('/');
+    let (mount, rel) = mounts
+        .iter()
+        .find_map(|m| {
+            let mp = m.local_path.trim_end_matches('/');
+            if trimmed == mp {
+                Some((m, String::new()))
+            } else if let Some(stripped) = trimmed.strip_prefix(&format!("{}/", mp)) {
+                Some((m, stripped.to_string()))
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            OdriveError::CliError(format!("path is not inside an odrive mount: {}", path))
+        })?;
+
+    let rel = rel
+        .strip_suffix(".cloudf")
+        .or_else(|| rel.strip_suffix(".cloud"))
+        .map(|s| s.to_string())
+        .unwrap_or(rel);
+
+    let remote_prefix = mount.remote_path.trim_start_matches('/').trim_end_matches('/');
+    let combined = match (remote_prefix.is_empty(), rel.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => rel,
+        (false, true) => remote_prefix.to_string(),
+        (false, false) => format!("{}/{}", remote_prefix, rel),
+    };
+
+    Ok(format!(
+        "https://www.odrive.com/browse/{}",
+        percent_encode_path(&combined)
+    ))
+}
+
+/// Percent-encode a path component for inclusion in an HTTP URL. Keeps
+/// RFC 3986 unreserved chars (`A-Z a-z 0-9 - _ . ~`) and `/` unencoded;
+/// every other byte (including spaces, `?`, `#`, `&`, non-ASCII UTF-8
+/// bytes) becomes `%XX`. Avoids pulling in the `percent-encoding` crate
+/// for what amounts to a half-screen of code.
+fn percent_encode_path(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                out.push(b as char);
+            }
+            _ => {
+                use std::fmt::Write;
+                let _ = write!(out, "%{:02X}", b);
+            }
+        }
+    }
+    out
+}
+
 /// `odrive placeholderthreshold` accepts these tokens. The tokens we send
 /// on the CLI (`never`/`small`/`medium`/`large`/`always`) do NOT match
 /// the way the upstream reports them back in `odrive status` — `never`
@@ -779,6 +842,17 @@ curl -fL "https://dl.odrive.com/odrivecli-lnx-64" | tar -xzf- -C "$od/"
         }
     }
 
+    /// Compose the odrive web-app URL for a local path. Looks up which
+    /// mount the path lives under, joins the mount's `remote_path` with
+    /// the relative segment, strips a trailing `.cloud`/`.cloudf`
+    /// placeholder suffix, and percent-encodes the result. There is no
+    /// upstream CLI command for this — we build the URL ourselves from
+    /// `odrive status --mounts` data.
+    pub fn web_url(&self, path: &str) -> Result<String, OdriveError> {
+        let mounts = self.get_mounts()?;
+        build_web_url(path, &mounts)
+    }
+
     /// Wrapper for `odrive authenticate <auth_key>`. Used by the wizard's
     /// Login page after the user pastes their key from
     /// https://www.odrive.com/account/authcodes.
@@ -1106,6 +1180,92 @@ mod tests {
         // remote-side line `  status:None` by itself. That has no local
         // path and shouldn't materialise as a phantom mount in the GUI.
         assert!(parse_mounts("  status:None\n").is_empty());
+    }
+
+    fn root_mount() -> OdriveMount {
+        OdriveMount {
+            local_path: "/home/keith/odrive".into(),
+            remote_path: "/".into(),
+            status: "Active".into(),
+        }
+    }
+
+    #[test]
+    fn percent_encode_path_keeps_path_safe_chars() {
+        assert_eq!(percent_encode_path("foo"), "foo");
+        assert_eq!(percent_encode_path("Google Drive"), "Google%20Drive");
+        assert_eq!(percent_encode_path("a/b c"), "a/b%20c");
+        assert_eq!(percent_encode_path("a?b#c&d"), "a%3Fb%23c%26d");
+        // UTF-8 bytes for `é` are 0xC3 0xA9.
+        assert_eq!(percent_encode_path("café"), "caf%C3%A9");
+    }
+
+    #[test]
+    fn build_web_url_root_mount_subfolder() {
+        let mounts = vec![root_mount()];
+        let url = build_web_url("/home/keith/odrive/Google Drive", &mounts).unwrap();
+        assert_eq!(url, "https://www.odrive.com/browse/Google%20Drive");
+    }
+
+    #[test]
+    fn build_web_url_strips_cloud_suffix() {
+        let mounts = vec![root_mount()];
+        let url =
+            build_web_url("/home/keith/odrive/Google Drive/foo.cloud", &mounts).unwrap();
+        assert_eq!(url, "https://www.odrive.com/browse/Google%20Drive/foo");
+    }
+
+    #[test]
+    fn build_web_url_strips_cloudf_suffix() {
+        let mounts = vec![root_mount()];
+        let url = build_web_url("/home/keith/odrive/Backups.cloudf", &mounts).unwrap();
+        assert_eq!(url, "https://www.odrive.com/browse/Backups");
+    }
+
+    #[test]
+    fn build_web_url_mount_root_itself() {
+        let mounts = vec![root_mount()];
+        let url = build_web_url("/home/keith/odrive", &mounts).unwrap();
+        assert_eq!(url, "https://www.odrive.com/browse/");
+    }
+
+    #[test]
+    fn build_web_url_non_root_mount() {
+        // Mount where remote_path is `/Work`, not the odrive root.
+        let mounts = vec![OdriveMount {
+            local_path: "/home/keith/work-od".into(),
+            remote_path: "/Work".into(),
+            status: "Active".into(),
+        }];
+        let url = build_web_url("/home/keith/work-od/notes.txt", &mounts).unwrap();
+        assert_eq!(url, "https://www.odrive.com/browse/Work/notes.txt");
+    }
+
+    #[test]
+    fn build_web_url_non_root_mount_root_itself() {
+        let mounts = vec![OdriveMount {
+            local_path: "/home/keith/work-od".into(),
+            remote_path: "/Work".into(),
+            status: "Active".into(),
+        }];
+        let url = build_web_url("/home/keith/work-od", &mounts).unwrap();
+        assert_eq!(url, "https://www.odrive.com/browse/Work");
+    }
+
+    #[test]
+    fn build_web_url_path_outside_any_mount_errors() {
+        let mounts = vec![root_mount()];
+        let err = build_web_url("/tmp/foo.txt", &mounts).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("not inside an odrive mount"), "got: {}", msg);
+    }
+
+    #[test]
+    fn build_web_url_trailing_slash_normalised() {
+        let mounts = vec![root_mount()];
+        let url =
+            build_web_url("/home/keith/odrive/Google Drive/", &mounts).unwrap();
+        assert_eq!(url, "https://www.odrive.com/browse/Google%20Drive");
     }
 
     #[test]

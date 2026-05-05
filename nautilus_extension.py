@@ -276,6 +276,15 @@ class OdriveExtension(GObject.GObject, Nautilus.MenuProvider, Nautilus.InfoProvi
         copy_item.connect('activate', self.on_copy_share_link_clicked, in_mount_any)
         submenu.append_item(copy_item)
 
+        # Open Web Preview — open this item in odrive's web app.
+        web_item = Nautilus.MenuItem(
+            name='OdriveMenu::OpenWeb',
+            label='Open Web Preview',
+            tip='Open this item in the odrive web app'
+        )
+        web_item.connect('activate', self.on_open_web_clicked, in_mount_any)
+        submenu.append_item(web_item)
+
         # Parent label with the bundled odrive-menu icon (installed under
         # hicolor/<size>/apps/ by `odrive-cli install-handlers`).
         parent = Nautilus.MenuItem(
@@ -320,6 +329,22 @@ class OdriveExtension(GObject.GObject, Nautilus.MenuProvider, Nautilus.InfoProvi
                              stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL,
                              start_new_session=True)
+
+    def on_open_web_clicked(self, menu, paths):
+        for path in paths:
+            try:
+                result = subprocess.run(
+                    [self.cli_path, 'weburl', path],
+                    capture_output=True, text=True, check=True,
+                )
+                url = result.stdout.strip()
+                if url:
+                    subprocess.Popen(['xdg-open', url],
+                                     stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL,
+                                     start_new_session=True)
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                pass
 
     def on_copy_share_link_clicked(self, menu, paths):
         urls = self._generate_share_links(paths)

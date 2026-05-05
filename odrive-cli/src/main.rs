@@ -42,6 +42,11 @@ enum Commands {
         /// Path to the item (placeholder or materialised) to share
         path: String,
     },
+    /// Compose the odrive web-app URL for a local path. Prints the URL on stdout.
+    Weburl {
+        /// Path to the item under an odrive mount
+        path: String,
+    },
     /// Scan for placeholders and update the database
     Scan {
         /// Mount path to scan (defaults to ~/odrive)
@@ -147,6 +152,15 @@ fn main() {
                 Ok(url) => println!("{}", url),
                 Err(e) => {
                     eprintln!("sharelink failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Some(Commands::Weburl { path }) => {
+            match agent.web_url(&path) {
+                Ok(url) => println!("{}", url),
+                Err(e) => {
+                    eprintln!("weburl failed: {}", e);
                     std::process::exit(1);
                 }
             }
