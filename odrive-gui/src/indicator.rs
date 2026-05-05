@@ -103,6 +103,26 @@ struct RenderedSet {
     frame_idx: usize,
 }
 
+/// Probe the icon theme for a complete `odrive-tray-<color>-active-1..N`
+/// frame set. Returns `Some(frames)` only if every frame resolves —
+/// `render_pixmap` returns an empty Vec when the theme has no entry,
+/// which lets us cleanly distinguish "no animation bundled for this
+/// colour" from "animation bundled". Bails at the first miss rather
+/// than continuing past gaps; a partial install would be a packaging
+/// bug, not something to paper over.
+fn render_frames_for_color(color: &str) -> Option<Vec<RenderedIcon>> {
+    let mut frames = Vec::with_capacity(ANIMATION_FRAMES as usize);
+    for n in 1..=ANIMATION_FRAMES {
+        let name = format!("{}-active-{}", icon_name_for_color(color), n);
+        let pixmap = render_pixmap(&name, ICON_SIZE);
+        if pixmap.is_empty() {
+            return None;
+        }
+        frames.push(RenderedIcon { name, pixmap });
+    }
+    Some(frames)
+}
+
 impl RenderedSet {
     fn for_color(color: &str) -> Self {
         let idle_name = icon_name_for_color(color);
@@ -111,22 +131,15 @@ impl RenderedSet {
             name: idle_name,
         };
 
-        // Probe each frame name in turn. `render_pixmap` returns an
-        // empty Vec when the icon-theme entry doesn't resolve, which is
-        // how we distinguish "this colour has animation frames
-        // installed" from "it doesn't". We bail at the first miss
-        // rather than continuing past gaps — a partial install would
-        // be a packaging bug, not something to paper over.
-        let mut frames = Vec::with_capacity(ANIMATION_FRAMES as usize);
-        for n in 1..=ANIMATION_FRAMES {
-            let name = format!("{}-active-{}", icon_name_for_color(color), n);
-            let pixmap = render_pixmap(&name, ICON_SIZE);
-            if pixmap.is_empty() {
-                frames.clear();
-                break;
-            }
-            frames.push(RenderedIcon { name, pixmap });
-        }
+        // Try the user's chosen colour first; if it has no bundled
+        // animation set (darkgrey/grey today), fall back to the
+        // default colour (pink) which always ships a 16-frame set.
+        // The idle icon stays in the user's chosen colour either way
+        // — only the cycling frames switch — so the panel still
+        // reflects the appearance preference when nothing is going on.
+        let frames = render_frames_for_color(color)
+            .or_else(|| render_frames_for_color(DEFAULT_TRAY_ICON_COLOR))
+            .unwrap_or_default();
 
         Self { idle, frames, frame_idx: 0 }
     }
