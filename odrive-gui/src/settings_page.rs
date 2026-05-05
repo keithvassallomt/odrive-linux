@@ -44,6 +44,9 @@ pub fn build(
     let initial = agent.get_global_settings().unwrap_or_default();
 
     // ----- General group -----
+    // odrive removed the free tier, so the prior General/Premium split
+    // no longer reflects an account-state distinction — every threshold
+    // is just a global default. AutoUnsyncThreshold lives here now too.
     let general = PreferencesGroup::builder()
         .title("General")
         .description("Defaults applied to all mounts. Per-folder rules can override these.")
@@ -51,19 +54,11 @@ pub fn build(
 
     let placeholder_row = build_placeholder_row(initial.placeholder);
     let xl_row = build_xl_row(initial.xl);
+    let auto_unsync_row = build_auto_unsync_row(initial.auto_unsync);
     general.add(&placeholder_row);
     general.add(&xl_row);
+    general.add(&auto_unsync_row);
     page.add(&general);
-
-    // ----- Premium group -----
-    let premium = PreferencesGroup::builder()
-        .title("Premium")
-        .description("Requires an active odrive Premium subscription. Settings here will be rejected by the agent on free accounts.")
-        .build();
-
-    let auto_unsync_row = build_auto_unsync_row(initial.auto_unsync);
-    premium.add(&auto_unsync_row);
-    page.add(&premium);
 
     // ----- Appearance group -----
     // Tray-icon colour. The icons are installed by `odrive-cli
