@@ -256,6 +256,24 @@ class OdriveExtension(GObject.GObject, Nautilus.MenuProvider, Nautilus.InfoProvi
         refresh_item.connect('activate', self.on_refresh_clicked, in_mount_any)
         submenu.append_item(refresh_item)
 
+        # Share Link — generate a public URL and open it in the browser.
+        share_item = Nautilus.MenuItem(
+            name='OdriveMenu::ShareLink',
+            label='Share Link',
+            tip='Generate a share link and open it in the browser'
+        )
+        share_item.connect('activate', self.on_share_link_clicked, in_mount_any)
+        submenu.append_item(share_item)
+
+        # Copy Share Link — same URL, written to the clipboard instead.
+        copy_item = Nautilus.MenuItem(
+            name='OdriveMenu::CopyShareLink',
+            label='Copy Share Link',
+            tip='Generate a share link and copy it to the clipboard'
+        )
+        copy_item.connect('activate', self.on_copy_share_link_clicked, in_mount_any)
+        submenu.append_item(copy_item)
+
         # Parent label with the bundled odrive-menu icon (installed under
         # hicolor/<size>/apps/ by `odrive-cli install-handlers`).
         parent = Nautilus.MenuItem(
@@ -278,6 +296,45 @@ class OdriveExtension(GObject.GObject, Nautilus.MenuProvider, Nautilus.InfoProvi
     def on_refresh_clicked(self, menu, paths):
         for path in paths:
             subprocess.run([self.cli_path, 'refresh', path], check=False)
+
+    def _generate_share_links(self, paths):
+        urls = []
+        for path in paths:
+            try:
+                result = subprocess.run(
+                    [self.cli_path, 'sharelink', path],
+                    capture_output=True, text=True, check=True,
+                )
+                url = result.stdout.strip()
+                if url:
+                    urls.append(url)
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                pass
+        return urls
+
+    def on_share_link_clicked(self, menu, paths):
+        for url in self._generate_share_links(paths):
+            subprocess.Popen(['xdg-open', url],
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+
+    def on_copy_share_link_clicked(self, menu, paths):
+        urls = self._generate_share_links(paths)
+        if not urls:
+            return
+        text = '\n'.join(urls)
+        # Wayland first (Ubuntu 25.10's default), X11 second. If neither
+        # tool is on PATH the link silently isn't copied — there's no
+        # meaningful recovery from a Nautilus extension hook.
+        if os.environ.get('WAYLAND_DISPLAY'):
+            cmd = ['wl-copy']
+        else:
+            cmd = ['xclip', '-selection', 'clipboard']
+        try:
+            subprocess.run(cmd, input=text, text=True, check=False)
+        except FileNotFoundError:
+            pass
 
     # InfoProvider — applies emblems and pads placeholders on the fly.
     #

@@ -37,6 +37,11 @@ enum Commands {
         /// Path to the folder
         path: String,
     },
+    /// Generate a share link for a file or folder. Prints the URL on stdout.
+    Sharelink {
+        /// Path to the item (placeholder or materialised) to share
+        path: String,
+    },
     /// Scan for placeholders and update the database
     Scan {
         /// Mount path to scan (defaults to ~/odrive)
@@ -135,6 +140,15 @@ fn main() {
             match agent.unsync(&path) {
                 Ok(out) => println!("Done: {}", out),
                 Err(e) => eprintln!("Unsync failed: {}", e),
+            }
+        }
+        Some(Commands::Sharelink { path }) => {
+            match agent.share_link(&path) {
+                Ok(url) => println!("{}", url),
+                Err(e) => {
+                    eprintln!("sharelink failed: {}", e);
+                    std::process::exit(1);
+                }
             }
         }
         Some(Commands::Refresh { path }) => {

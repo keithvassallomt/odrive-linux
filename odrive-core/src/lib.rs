@@ -762,6 +762,23 @@ curl -fL "https://dl.odrive.com/odrivecli-lnx-64" | tar -xzf- -C "$od/"
         }
     }
 
+    /// Wrapper for `odrive sharelink <path>`. The upstream CLI prints a
+    /// single share URL on stdout (e.g. `https://www.odrive.com/s/<id>`)
+    /// and exits 0; we trim trailing whitespace so callers can drop the
+    /// result straight into `xdg-open` or a clipboard write.
+    pub fn share_link(&self, path: &str) -> Result<String, OdriveError> {
+        let output = Command::new(&self.bin_path)
+            .arg("sharelink")
+            .arg(path)
+            .output()?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        } else {
+            Err(OdriveError::CliError(String::from_utf8_lossy(&output.stderr).to_string()))
+        }
+    }
+
     /// Wrapper for `odrive authenticate <auth_key>`. Used by the wizard's
     /// Login page after the user pastes their key from
     /// https://www.odrive.com/account/authcodes.
