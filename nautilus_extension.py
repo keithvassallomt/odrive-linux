@@ -4,7 +4,9 @@ import sqlite3
 import subprocess
 import sys
 import time
-from gi.repository import Nautilus, GObject
+import gi
+gi.require_version('Gdk', '4.0')
+from gi.repository import Nautilus, GObject, Gdk
 
 
 # Cross-process sync state. The GUI inserts a row before kicking off a
@@ -324,9 +326,14 @@ class OdriveExtension(GObject.GObject, Nautilus.MenuProvider, Nautilus.InfoProvi
         if not urls:
             return
         text = '\n'.join(urls)
-        # Wayland first (Ubuntu 25.10's default), X11 second. If neither
-        # tool is on PATH the link silently isn't copied — there's no
-        # meaningful recovery from a Nautilus extension hook.
+        # GTK4 in-process clipboard via Gdk. We're already inside
+        # Nautilus's GTK4 process so the display is live; the clipboard
+        # holds its own ref to the ContentProvider, so the data
+        # survives this function's stack frame.
+        if self._copy_via_gtk(text):
+            return
+        # External-tool fallback if Gdk somehow couldn't claim the
+        # clipboard. Both tools are optional installs on most distros.
         if os.environ.get('WAYLAND_DISPLAY'):
             cmd = ['wl-copy']
         else:
@@ -335,6 +342,22 @@ class OdriveExtension(GObject.GObject, Nautilus.MenuProvider, Nautilus.InfoProvi
             subprocess.run(cmd, input=text, text=True, check=False)
         except FileNotFoundError:
             pass
+
+    @staticmethod
+    def _copy_via_gtk(text):
+        try:
+            display = Gdk.Display.get_default()
+            if display is None:
+                return False
+            clipboard = display.get_clipboard()
+            val = GObject.Value()
+            val.init(GObject.TYPE_STRING)
+            val.set_string(text)
+            provider = Gdk.ContentProvider.new_for_value(val)
+            clipboard.set_content(provider)
+            return True
+        except Exception:
+            return False
 
     # InfoProvider — applies emblems and pads placeholders on the fly.
     #
