@@ -1,4 +1,5 @@
 mod indicator;
+mod log_viewer;
 mod mount_detail;
 mod settings_page;
 mod wizard;

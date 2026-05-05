@@ -311,6 +311,64 @@ fn build_status_page(
 
     page.add(&agent_group);
 
+    // ----- Logs group -----
+    // Two leaf actions:
+    //   View → opens the live-tail viewer (`log_viewer::present`).
+    //   Open → xdg-opens the log directory in Files.
+    // Both target the upstream agent's `~/.odrive-agent/log/main.log`
+    // (and its directory). We don't ship our own logs — the GUI's
+    // useful state already lives in the agent log + the systemd-user
+    // journal, and the user-visible value is in the agent's record
+    // of what the daemon is doing.
+    let logs_group = PreferencesGroup::builder()
+        .title("Logs")
+        .description("Upstream agent log at ~/.odrive-agent/log/main.log.")
+        .build();
+
+    let logs_row = ActionRow::builder()
+        .title("Agent log")
+        .subtitle("View live, or open the folder in Files")
+        .build();
+    let view_btn = Button::builder()
+        .label("View")
+        .valign(gtk::Align::Center)
+        .build();
+    view_btn.add_css_class("pill");
+    let open_btn = Button::builder()
+        .label("Open")
+        .valign(gtk::Align::Center)
+        .build();
+    open_btn.add_css_class("pill");
+    logs_row.add_suffix(&view_btn);
+    logs_row.add_suffix(&open_btn);
+    logs_group.add(&logs_row);
+    page.add(&logs_group);
+
+    view_btn.connect_clicked({
+        let window = window.clone();
+        let overlay = overlay.clone();
+        move |_| {
+            let Some(app) = window
+                .application()
+                .and_then(|a| a.downcast::<Application>().ok())
+            else {
+                overlay.add_toast(Toast::new("Could not resolve application"));
+                return;
+            };
+            crate::log_viewer::present(&app, Some(&window));
+        }
+    });
+
+    open_btn.connect_clicked({
+        let overlay = overlay.clone();
+        move |_| {
+            let dir = crate::log_viewer::log_dir();
+            if let Err(e) = std::process::Command::new("xdg-open").arg(&dir).spawn() {
+                overlay.add_toast(Toast::new(&format!("Could not open log folder: {}", e)));
+            }
+        }
+    });
+
     // Refresh closure: pulls is_running, paints status_row + button
     // label, and re-counts the placeholder DB. Wrapped in `Rc` so the
     // start/stop and scan handlers can fire it on demand alongside
