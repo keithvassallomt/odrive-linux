@@ -215,6 +215,13 @@ const MIME_FOLDER: &str = "application/vnd.odrive.placeholder-folder";
 const MIME_XML_NAME: &str = "odrive-linux.xml";
 const DESKTOP_NAME: &str = "odrive-linux-open.desktop";
 
+/// Icon names bound to the two generic placeholder MIME types. Concrete
+/// `.gdocx.cloud`-style sub-MIMEs override these via their own `<icon>`
+/// elements; a plain `*.cloud` / `*.cloudf` resolves to the parent MIME
+/// and these icons.
+const PLACEHOLDER_FILE_ICON: &str = "odrive-cloud-file";
+const PLACEHOLDER_FOLDER_ICON: &str = "odrive-cloud-folder";
+
 /// Cloud-file-type sub-MIMEs. Each entry: (icons subdir, mime/icon stem,
 /// glob patterns). The MIME stems become `application/vnd.odrive.<stem>-cloud`
 /// (e.g. `gdoc-cloud`); icons under `~/.local/share/icons/hicolor/<size>/mimetypes/`
@@ -419,6 +426,71 @@ fn install_mount_folder_icon(
     Ok(count)
 }
 
+/// Install the bundled cloud-file or cloud-folder placeholder icon under
+/// hicolor's `mimetypes/` category as `target_name`. Source filenames
+/// follow the dash-separated `<stem>-NxN.png` shape (with byte-identical
+/// `@2x` duplicates the asset bundle ships) — we skip the `@2x` files
+/// and deposit each remaining sized PNG into its own size bucket plus a
+/// 48x48 list-view shim. A missing source directory yields `Ok(0)`,
+/// matching the other icon installers' defensive shape.
+fn install_placeholder_icon(
+    icons_dir: &std::path::Path,
+    hicolor: &str,
+    src_subdir: &str,
+    target_name: &str,
+) -> std::io::Result<usize> {
+    let src_dir = icons_dir.join("mime_icons").join(src_subdir);
+    if !src_dir.is_dir() {
+        return Ok(0);
+    }
+    let mut sized: Vec<(u32, std::path::PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(&src_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("png") {
+            continue;
+        }
+        let stem = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s,
+            None => continue,
+        };
+        if stem.contains("@2x") {
+            continue;
+        }
+        let Some(size) = parse_dashed_icon_size(stem) else { continue };
+        sized.push((size, path));
+    }
+    if sized.is_empty() {
+        return Ok(0);
+    }
+    sized.sort_by_key(|(s, _)| *s);
+    let mut count = 0usize;
+    for (size, path) in &sized {
+        let dst_dir = format!("{}/{}x{}/mimetypes", hicolor, size, size);
+        std::fs::create_dir_all(&dst_dir)?;
+        std::fs::copy(path, format!("{}/{}.png", dst_dir, target_name))?;
+        count += 1;
+    }
+    if let Some((_, smallest)) = sized.first() {
+        let dst_dir = format!("{}/48x48/mimetypes", hicolor);
+        std::fs::create_dir_all(&dst_dir)?;
+        std::fs::copy(smallest, format!("{}/{}.png", dst_dir, target_name))?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// Parse a size from a dash-separated filename stem like `cloud-file-512x512` → 512.
+/// The asset bundle uses this shape for `mime_icons/cloud-file/` and
+/// `mime_icons/cloud-folder/` (alongside byte-identical `@2x` duplicates the
+/// caller filters out). Returns `None` if the trailing chunk doesn't parse
+/// as `<N>x<N>`.
+fn parse_dashed_icon_size(file_stem: &str) -> Option<u32> {
+    let last = file_stem.rsplit('-').next()?;
+    let n = last.split('x').next()?;
+    n.parse().ok()
+}
+
 /// Install the animated tray-icon frame set for one colour. The bundle
 /// is asymmetric: only `pink`, `white`, and `black` ship animation
 /// frames under `odrive-icons/tray-icons/animated/<color>/`, and the
@@ -524,17 +596,21 @@ fn panel_source_for(subdir: &std::path::Path, master: &std::path::Path) -> Optio
 }
 
 fn build_mime_xml() -> String {
-    let mut out = String::from(
+    let mut out = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <mime-info xmlns=\"http://www.freedesktop.org/standards/shared-mime-info\">\n  \
          <mime-type type=\"application/vnd.odrive.placeholder-file\">\n    \
          <comment>odrive remote-only file</comment>\n    \
+         <icon name=\"{file_icon}\"/>\n    \
          <glob pattern=\"*.cloud\"/>\n  \
          </mime-type>\n  \
          <mime-type type=\"application/vnd.odrive.placeholder-folder\">\n    \
          <comment>odrive remote-only folder</comment>\n    \
+         <icon name=\"{folder_icon}\"/>\n    \
          <glob pattern=\"*.cloudf\"/>\n  \
          </mime-type>\n",
+        file_icon = PLACEHOLDER_FILE_ICON,
+        folder_icon = PLACEHOLDER_FOLDER_ICON,
     );
     for (_subdir, stem, globs) in CLOUD_TYPES {
         out.push_str(&format!(
@@ -611,6 +687,18 @@ fn install_handlers() -> Result<(), Box<dyn std::error::Error>> {
             icon_files += install_tray_animation(&icons_dir, &hicolor, color)?;
         }
         icon_files += install_mount_folder_icon(&icons_dir, &hicolor)?;
+        icon_files += install_placeholder_icon(
+            &icons_dir,
+            &hicolor,
+            "cloud-file",
+            PLACEHOLDER_FILE_ICON,
+        )?;
+        icon_files += install_placeholder_icon(
+            &icons_dir,
+            &hicolor,
+            "cloud-folder",
+            PLACEHOLDER_FOLDER_ICON,
+        )?;
         let _ = std::process::Command::new("gtk-update-icon-cache")
             .args(["-f", "-t"])
             .arg(&hicolor)
@@ -687,10 +775,12 @@ fn uninstall_handlers() -> Result<(), Box<dyn std::error::Error>> {
     // Sweep our installed icons. We only delete files we wrote; other
     // emblems/mimetypes/status icons in hicolor are untouched.
     let emblem_targets: Vec<String> = EMBLEMS.iter().map(|(_, n)| (*n).to_string()).collect();
-    let mime_targets: Vec<String> = CLOUD_TYPES
+    let mut mime_targets: Vec<String> = CLOUD_TYPES
         .iter()
         .map(|(_, stem, _)| format!("odrive-{}-cloud", stem))
         .collect();
+    mime_targets.push(PLACEHOLDER_FILE_ICON.to_string());
+    mime_targets.push(PLACEHOLDER_FOLDER_ICON.to_string());
     let mut status_targets: Vec<String> = TRAY_COLORS
         .iter()
         .map(|c| format!("odrive-tray-{}", c))
