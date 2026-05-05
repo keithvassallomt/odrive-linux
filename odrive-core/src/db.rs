@@ -30,6 +30,23 @@ pub struct FolderRule {
     pub threshold_mb: i32,
     pub expand_subfolders: bool,
     pub created_at: i64,
+    /// When `Some`, the user has paused this rule via the Manager.
+    /// Holds the previous `threshold_mb` (= the value to restore on
+    /// resume); while paused, the live `threshold_mb` is forced to
+    /// `0` so the upstream agent treats the rule as "never
+    /// auto-download" and the rule remains visible (but inert) in the
+    /// per-folder editor. `None` = active (the common case).
+    pub paused_threshold_mb: Option<i32>,
+}
+
+impl FolderRule {
+    /// Convenience: a rule is paused iff `paused_threshold_mb` is
+    /// `Some`. UI renderers should use this rather than re-checking
+    /// the field, so future representation tweaks (e.g. adding a
+    /// `paused_at` timestamp) don't require touching every call site.
+    pub fn is_paused(&self) -> bool {
+        self.paused_threshold_mb.is_some()
+    }
 }
 
 impl OdriveDb {
@@ -74,7 +91,39 @@ impl OdriveDb {
             )",
             [],
         )?;
+        self.migrate()?;
         Ok(())
+    }
+
+    /// Idempotent forward-only migrations. Run from `init` after the
+    /// CREATE TABLE statements so an old database picks up new columns
+    /// on the first `OdriveDb::open` call after upgrading.
+    ///
+    /// Currently:
+    /// - Add `paused_threshold_mb INTEGER NULL` to `folder_sync_rules`
+    ///   for the pause/resume feature. Existing rows get NULL
+    ///   (= "not paused") which preserves prior behaviour.
+    fn migrate(&self) -> Result<()> {
+        if !self.column_exists("folder_sync_rules", "paused_threshold_mb")? {
+            self.conn.execute(
+                "ALTER TABLE folder_sync_rules ADD COLUMN paused_threshold_mb INTEGER",
+                [],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn column_exists(&self, table: &str, column: &str) -> Result<bool> {
+        let pragma = format!("PRAGMA table_info({})", table);
+        let mut stmt = self.conn.prepare(&pragma)?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub fn upsert_placeholder(&self, local_path: &str, is_folder: bool, status: &str) -> Result<()> {
@@ -144,7 +193,8 @@ impl OdriveDb {
     /// Return the rule for `local_path`, or `None` if there isn't one.
     pub fn get_folder_rule(&self, local_path: &str) -> Result<Option<FolderRule>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, local_path, threshold_mb, expand_subfolders, created_at
+            "SELECT id, local_path, threshold_mb, expand_subfolders, created_at,
+                    paused_threshold_mb
              FROM folder_sync_rules WHERE local_path = ?1",
         )?;
         let row = stmt
@@ -155,10 +205,57 @@ impl OdriveDb {
                     threshold_mb: row.get(2)?,
                     expand_subfolders: row.get(3)?,
                     created_at: row.get(4)?,
+                    paused_threshold_mb: row.get(5)?,
                 })
             })
             .ok();
         Ok(row)
+    }
+
+    /// Pause `local_path` if a rule exists and isn't already paused.
+    /// Stores the current `threshold_mb` in `paused_threshold_mb`
+    /// and forces the live `threshold_mb` to `0`. Returns the
+    /// previous threshold so the caller can decide what to push to
+    /// the upstream agent (typically `FolderSyncThreshold::None`).
+    ///
+    /// Idempotent: pausing an already-paused or non-existent rule is
+    /// a no-op (`Ok(None)`).
+    pub fn pause_folder_rule(&self, local_path: &str) -> Result<Option<i32>> {
+        let Some(rule) = self.get_folder_rule(local_path)? else {
+            return Ok(None);
+        };
+        if rule.is_paused() {
+            return Ok(None);
+        }
+        self.conn.execute(
+            "UPDATE folder_sync_rules
+             SET paused_threshold_mb = ?2, threshold_mb = 0
+             WHERE local_path = ?1",
+            params![local_path, rule.threshold_mb],
+        )?;
+        Ok(Some(rule.threshold_mb))
+    }
+
+    /// Resume a paused rule for `local_path`. Restores the stored
+    /// `paused_threshold_mb` to `threshold_mb` and clears
+    /// `paused_threshold_mb`. Returns the restored threshold so the
+    /// caller can push it back to the upstream agent.
+    ///
+    /// Idempotent on a non-paused / non-existent rule (`Ok(None)`).
+    pub fn resume_folder_rule(&self, local_path: &str) -> Result<Option<i32>> {
+        let Some(rule) = self.get_folder_rule(local_path)? else {
+            return Ok(None);
+        };
+        let Some(prior) = rule.paused_threshold_mb else {
+            return Ok(None);
+        };
+        self.conn.execute(
+            "UPDATE folder_sync_rules
+             SET paused_threshold_mb = NULL, threshold_mb = ?2
+             WHERE local_path = ?1",
+            params![local_path, prior],
+        )?;
+        Ok(Some(prior))
     }
 
     /// Drop the row for `local_path`. Idempotent: deleting a
@@ -218,7 +315,8 @@ impl OdriveDb {
     /// don't have to re-sort for stable display.
     pub fn list_folder_rules(&self) -> Result<Vec<FolderRule>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, local_path, threshold_mb, expand_subfolders, created_at
+            "SELECT id, local_path, threshold_mb, expand_subfolders, created_at,
+                    paused_threshold_mb
              FROM folder_sync_rules ORDER BY local_path",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -228,6 +326,7 @@ impl OdriveDb {
                 threshold_mb: row.get(2)?,
                 expand_subfolders: row.get(3)?,
                 created_at: row.get(4)?,
+                paused_threshold_mb: row.get(5)?,
             })
         })?;
         let mut out = Vec::new();
@@ -350,6 +449,111 @@ mod tests {
         assert_eq!(r.threshold_mb, 250);
         assert!(r.expand_subfolders);
         assert!(r.created_at > 0, "created_at should be a real timestamp");
+    }
+
+    // ----- folder_sync_rules pause / resume -----
+
+    #[test]
+    fn pause_then_resume_round_trip() {
+        let db = fresh_db();
+        db.upsert_folder_rule("/p", 100, true).unwrap();
+
+        let prev = db.pause_folder_rule("/p").unwrap();
+        assert_eq!(prev, Some(100));
+        let r = db.get_folder_rule("/p").unwrap().unwrap();
+        // Paused state: live threshold zeroed, prior stashed away.
+        assert_eq!(r.threshold_mb, 0);
+        assert_eq!(r.paused_threshold_mb, Some(100));
+        assert!(r.is_paused());
+        // expand_subfolders is preserved across pause.
+        assert!(r.expand_subfolders);
+
+        let restored = db.resume_folder_rule("/p").unwrap();
+        assert_eq!(restored, Some(100));
+        let r = db.get_folder_rule("/p").unwrap().unwrap();
+        assert_eq!(r.threshold_mb, 100);
+        assert_eq!(r.paused_threshold_mb, None);
+        assert!(!r.is_paused());
+    }
+
+    #[test]
+    fn pause_is_idempotent() {
+        let db = fresh_db();
+        db.upsert_folder_rule("/p", 250, false).unwrap();
+        let first = db.pause_folder_rule("/p").unwrap();
+        assert_eq!(first, Some(250));
+        // Second pause is a no-op — would otherwise overwrite the
+        // stashed value with 0 and break resume.
+        let second = db.pause_folder_rule("/p").unwrap();
+        assert_eq!(second, None);
+        let r = db.get_folder_rule("/p").unwrap().unwrap();
+        assert_eq!(r.paused_threshold_mb, Some(250));
+        assert_eq!(r.threshold_mb, 0);
+    }
+
+    #[test]
+    fn resume_is_no_op_on_active_rule() {
+        let db = fresh_db();
+        db.upsert_folder_rule("/p", 100, false).unwrap();
+        let r = db.resume_folder_rule("/p").unwrap();
+        assert_eq!(r, None);
+        // Threshold unchanged.
+        assert_eq!(db.get_folder_rule("/p").unwrap().unwrap().threshold_mb, 100);
+    }
+
+    #[test]
+    fn pause_resume_on_missing_rule_is_ok() {
+        let db = fresh_db();
+        assert_eq!(db.pause_folder_rule("/never").unwrap(), None);
+        assert_eq!(db.resume_folder_rule("/never").unwrap(), None);
+    }
+
+    #[test]
+    fn pause_resume_preserves_inf_threshold() {
+        // -1 is the "unlimited" sentinel. Round-trip through pause /
+        // resume must restore exactly that, not a normalised positive.
+        let db = fresh_db();
+        db.upsert_folder_rule("/p", -1, false).unwrap();
+        db.pause_folder_rule("/p").unwrap();
+        assert_eq!(
+            db.get_folder_rule("/p").unwrap().unwrap().paused_threshold_mb,
+            Some(-1)
+        );
+        db.resume_folder_rule("/p").unwrap();
+        assert_eq!(db.get_folder_rule("/p").unwrap().unwrap().threshold_mb, -1);
+    }
+
+    #[test]
+    fn upsert_after_resume_clears_paused_field() {
+        // If the user edits an active rule's threshold via the editor
+        // (upsert), the paused column should remain NULL — there's no
+        // hidden state to restore later. Smoke-test that upsert
+        // doesn't accidentally repopulate paused_threshold_mb.
+        let db = fresh_db();
+        db.upsert_folder_rule("/p", 100, false).unwrap();
+        db.upsert_folder_rule("/p", 500, true).unwrap();
+        let r = db.get_folder_rule("/p").unwrap().unwrap();
+        assert_eq!(r.paused_threshold_mb, None);
+    }
+
+    #[test]
+    fn migration_is_idempotent_across_reopens() {
+        // Simulate "open the same DB twice in a row" — the migration
+        // path checks column_exists and skips ALTER if already there.
+        // Use a tempfile so both opens hit the same on-disk state.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ot.db");
+        {
+            let db = OdriveDb::open(&path).unwrap();
+            db.upsert_folder_rule("/p", 100, false).unwrap();
+        }
+        {
+            let db = OdriveDb::open(&path).unwrap();
+            // Row survives, and the new column is queryable (== None).
+            let r = db.get_folder_rule("/p").unwrap().unwrap();
+            assert_eq!(r.threshold_mb, 100);
+            assert_eq!(r.paused_threshold_mb, None);
+        }
     }
 
     // ----- sync_in_progress CRUD -----
