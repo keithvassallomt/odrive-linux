@@ -181,7 +181,7 @@ fn build_dashboard_page(
     // app-level commands. Houses Preferences and About; future entries
     // (Pause / Resume, Quit on the panel-indicator side) will land here
     // too.
-    let menu = primary_menu(&nav, &agent, &overlay, &tray);
+    let menu = primary_menu(&agent, &overlay, &tray);
     let menu_btn = MenuButton::builder()
         .icon_name("open-menu-symbolic")
         .menu_model(&menu.0)
@@ -514,7 +514,6 @@ fn confirm_and_unmount(
 /// pairs to be installed on the application via
 /// `install_menu_actions`.
 fn primary_menu(
-    nav: &NavigationView,
     agent: &Rc<OdriveAgent>,
     overlay: &ToastOverlay,
     tray: &Rc<indicator::TrayController>,
@@ -527,17 +526,27 @@ fn primary_menu(
 
     let mut actions: Vec<(String, Box<dyn Fn() + 'static>)> = Vec::new();
 
-    // Preferences action → push the settings page onto the nav stack.
+    // Preferences action → open the standalone Preferences window
+    // (sidebar + content, GNOME-Settings shape). Modeless so the
+    // dashboard stays interactive behind it; `present` finds the
+    // app's active ApplicationWindow and uses it as the transient
+    // parent so window-managers position the dialog sensibly.
     {
-        let nav = nav.clone();
         let agent = agent.clone();
-        let overlay = overlay.clone();
         let tray = tray.clone();
         actions.push((
             "preferences".to_string(),
             Box::new(move || {
-                let page = settings_page::build(agent.clone(), overlay.clone(), tray.clone());
-                nav.push(&page);
+                let app = match gio::Application::default()
+                    .and_then(|a| a.downcast::<Application>().ok())
+                {
+                    Some(a) => a,
+                    None => return,
+                };
+                let parent = app
+                    .active_window()
+                    .and_then(|w| w.downcast::<ApplicationWindow>().ok());
+                settings_page::present(&app, parent.as_ref(), agent.clone(), tray.clone());
             }),
         ));
     }

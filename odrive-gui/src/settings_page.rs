@@ -1,13 +1,14 @@
-//! Global Settings page. Three `Adw.ComboRow` widgets bound to the three
-//! threshold enums in `odrive_core`. Changes apply immediately on
-//! selection — same idiom as GNOME Settings, no Save button. If the
-//! upstream rejects a value (e.g. autounsync on a non-premium account),
-//! we surface the CLI error verbatim as a toast and revert the row to
-//! the value the agent reports back.
+//! Preferences window. Modelled on GNOME Settings: an
+//! `Adw.NavigationSplitView` with a sidebar listing categories on the
+//! left and the corresponding `Adw.PreferencesPage` (or stub) on the
+//! right. Categories: General, Appearance, Advanced (placeholder for
+//! future settings), Status (placeholder; Phase B fills it with the
+//! Agent panel + log viewer).
 //!
-//! Layout follows current libadwaita idioms: `Adw.ToolbarView` wraps a
-//! `HeaderBar` + `Adw.PreferencesPage`, and the rows are split across
-//! `Adw.PreferencesGroup`s ("General" / "Premium").
+//! Each `Adw.ComboRow` applies its change immediately on selection —
+//! no Save button, same idiom as GNOME Settings. On any CLI failure we
+//! surface the error verbatim as a toast and revert the row to the
+//! value the agent reports back.
 //!
 //! Long-running operations are not expected here (each setter is a
 //! single CLI invocation that exits immediately) so we run them
@@ -16,10 +17,14 @@ use crate::indicator::TrayController;
 use libadwaita as adw;
 use adw::prelude::*;
 use adw::{
-    ComboRow, HeaderBar, NavigationPage, PreferencesGroup, PreferencesPage, Toast, ToastOverlay,
-    ToolbarView,
+    ApplicationWindow, ComboRow, HeaderBar, NavigationPage, NavigationSplitView,
+    PreferencesGroup, PreferencesPage, StatusPage, Toast, ToastOverlay, ToolbarView,
+    WindowTitle,
 };
-use adw::gtk::StringList;
+use adw::gtk::{
+    self, Application, Label, ListBox, ListBoxRow, SelectionMode, Stack,
+    StackTransitionType, StringList,
+};
 use odrive_core::{
     AutoUnsyncThreshold, OdriveAgent, OdriveConfig, PlaceholderThreshold, XlThreshold,
     DEFAULT_TRAY_ICON_COLOR, TRAY_ICON_COLORS,
@@ -27,14 +32,150 @@ use odrive_core::{
 use std::cell::RefCell;
 use std::rc::Rc;
 
-pub fn build(
-    agent: Rc<OdriveAgent>,
-    overlay: ToastOverlay,
-    tray: Rc<TrayController>,
-) -> NavigationPage {
-    let toolbar = ToolbarView::new();
-    toolbar.add_top_bar(&HeaderBar::new());
+/// Sidebar categories. The order here is the on-screen order; the
+/// stack name is the key passed to `Stack::set_visible_child_name`.
+/// Keep in sync with `build_section_content`.
+const SECTIONS: &[(&str, &str)] = &[
+    ("general", "General"),
+    ("appearance", "Appearance"),
+    ("advanced", "Advanced"),
+    ("status", "Status"),
+];
 
+/// Open the Preferences window. Creates a fresh `ApplicationWindow`
+/// each time it's invoked rather than reusing a hidden one — the
+/// window is cheap to build and a single-use lifecycle is easier to
+/// reason about (no stale combo state from a previous open). Modeless
+/// so the user can keep clicking around the dashboard while it's open.
+pub fn present(
+    app: &Application,
+    parent: Option<&ApplicationWindow>,
+    agent: Rc<OdriveAgent>,
+    tray: Rc<TrayController>,
+) {
+    let window = ApplicationWindow::builder()
+        .application(app)
+        .title("Preferences")
+        .default_width(820)
+        .default_height(560)
+        .modal(false)
+        .build();
+    if let Some(p) = parent {
+        window.set_transient_for(Some(p));
+    }
+
+    let split = NavigationSplitView::builder()
+        .min_sidebar_width(200.0)
+        .max_sidebar_width(280.0)
+        .build();
+
+    // Sidebar: Adwaita's `navigation-sidebar` styling on a ListBox
+    // gives the standard GNOME Settings look (selected row tinted with
+    // the accent colour, full-row click target).
+    let sidebar_listbox = ListBox::builder()
+        .selection_mode(SelectionMode::Single)
+        .css_classes(vec!["navigation-sidebar".to_string()])
+        .build();
+    for (_name, label) in SECTIONS {
+        let lbl = Label::builder()
+            .label(*label)
+            .halign(gtk::Align::Start)
+            .margin_start(12)
+            .margin_end(12)
+            .margin_top(8)
+            .margin_bottom(8)
+            .build();
+        let row = ListBoxRow::new();
+        row.set_child(Some(&lbl));
+        sidebar_listbox.append(&row);
+    }
+    let sidebar_toolbar = ToolbarView::new();
+    let sidebar_header = HeaderBar::new();
+    sidebar_header.set_title_widget(Some(&WindowTitle::new("Preferences", "")));
+    sidebar_toolbar.add_top_bar(&sidebar_header);
+    sidebar_toolbar.set_content(Some(&sidebar_listbox));
+    let sidebar_page = NavigationPage::builder()
+        .title("Preferences")
+        .child(&sidebar_toolbar)
+        .build();
+    split.set_sidebar(Some(&sidebar_page));
+
+    // Content: a single ToastOverlay wraps the Stack so toasts surface
+    // on whichever section is active. Each section is a child of the
+    // Stack keyed by `SECTIONS[i].0`.
+    let stack = Stack::builder()
+        .transition_type(StackTransitionType::Crossfade)
+        .build();
+    let toast_overlay = ToastOverlay::new();
+    toast_overlay.set_child(Some(&stack));
+
+    let content_toolbar = ToolbarView::new();
+    let content_header = HeaderBar::new();
+    let content_title = WindowTitle::new("General", "");
+    content_header.set_title_widget(Some(&content_title));
+    content_toolbar.add_top_bar(&content_header);
+    content_toolbar.set_content(Some(&toast_overlay));
+    let content_page = NavigationPage::builder()
+        .title("Preferences")
+        .child(&content_toolbar)
+        .build();
+    split.set_content(Some(&content_page));
+
+    // Build each section's content and add to the stack.
+    for (name, _) in SECTIONS {
+        let child = build_section_content(name, &agent, &toast_overlay, &tray);
+        stack.add_named(&child, Some(*name));
+    }
+
+    // Sidebar selection drives both the stack and the content header
+    // title. Default to the first row so the window opens on General.
+    let stack_for_select = stack.clone();
+    let title_for_select = content_title.clone();
+    sidebar_listbox.connect_row_selected(move |_, row| {
+        let Some(row) = row else { return };
+        let idx = row.index() as usize;
+        let Some((name, label)) = SECTIONS.get(idx) else { return };
+        stack_for_select.set_visible_child_name(name);
+        title_for_select.set_title(label);
+    });
+    if let Some(first) = sidebar_listbox.row_at_index(0) {
+        sidebar_listbox.select_row(Some(&first));
+    }
+
+    window.set_content(Some(&split));
+    window.present();
+}
+
+/// Construct a section's content widget. Real sections return a
+/// `PreferencesPage`; placeholders return a `StatusPage`. Returned as
+/// a generic `gtk::Widget` so the caller can stuff it into the stack
+/// without caring which kind it got.
+fn build_section_content(
+    name: &str,
+    agent: &Rc<OdriveAgent>,
+    overlay: &ToastOverlay,
+    tray: &Rc<TrayController>,
+) -> gtk::Widget {
+    match name {
+        "general" => build_general_page(agent, overlay).upcast(),
+        "appearance" => build_appearance_page(overlay, tray).upcast(),
+        "advanced" => StatusPage::builder()
+            .icon_name("preferences-system-symbolic")
+            .title("Advanced")
+            .description("Advanced settings will live here.")
+            .build()
+            .upcast(),
+        "status" => StatusPage::builder()
+            .icon_name("emblem-default-symbolic")
+            .title("Status")
+            .description("Agent status and logs will live here.")
+            .build()
+            .upcast(),
+        _ => StatusPage::new().upcast(),
+    }
+}
+
+fn build_general_page(agent: &Rc<OdriveAgent>, overlay: &ToastOverlay) -> PreferencesPage {
     let page = PreferencesPage::new();
     page.set_margin_top(12);
 
@@ -43,10 +184,6 @@ pub fn build(
     // adjusts them.
     let initial = agent.get_global_settings().unwrap_or_default();
 
-    // ----- General group -----
-    // odrive removed the free tier, so the prior General/Premium split
-    // no longer reflects an account-state distinction — every threshold
-    // is just a global default. AutoUnsyncThreshold lives here now too.
     let general = PreferencesGroup::builder()
         .title("General")
         .description("Defaults applied to all mounts. Per-folder rules can override these.")
@@ -60,25 +197,6 @@ pub fn build(
     general.add(&auto_unsync_row);
     page.add(&general);
 
-    // ----- Appearance group -----
-    // Tray-icon colour. The icons are installed by `odrive-cli
-    // install-handlers` into hicolor's `status` category as
-    // `odrive-tray-<color>`. Selection persists to
-    // ~/.config/odrive-linux/config.toml; the change applies live to
-    // the running indicator via TrayController and is picked up at the
-    // next process start when the GUI launches without an active tray.
-    let appearance = PreferencesGroup::builder()
-        .title("Appearance")
-        .description("How the panel indicator renders.")
-        .build();
-
-    let cfg = OdriveConfig::load();
-    let tray_row = build_tray_color_row(&cfg.tray_icon_color);
-    appearance.add(&tray_row);
-    page.add(&appearance);
-
-    toolbar.set_content(Some(&page));
-
     // Re-entrancy guard: applying a value may cause us to revert the
     // selection on error, which itself fires `notify::selected`. Without
     // this we'd loop or double-toast. Shared across all three handlers
@@ -88,13 +206,35 @@ pub fn build(
     wire_placeholder(&placeholder_row, agent.clone(), overlay.clone(), suppress.clone());
     wire_xl(&xl_row, agent.clone(), overlay.clone(), suppress.clone());
     wire_auto_unsync(&auto_unsync_row, agent.clone(), overlay.clone(), suppress.clone());
+
+    page
+}
+
+fn build_appearance_page(overlay: &ToastOverlay, tray: &Rc<TrayController>) -> PreferencesPage {
+    let page = PreferencesPage::new();
+    page.set_margin_top(12);
+
+    // Tray-icon colour. The icons are installed by `odrive-cli
+    // install-handlers` into hicolor's `status` category as
+    // `odrive-tray-<color>`. Selection persists to
+    // ~/.config/odrive-linux/config.toml; the change applies live to
+    // the running indicator via TrayController and is picked up at the
+    // next process start when the GUI launches without an active tray.
+    let appearance = PreferencesGroup::builder()
+        .title("Panel indicator")
+        .description("How the tray icon renders.")
+        .build();
+
+    let cfg = OdriveConfig::load();
+    let tray_row = build_tray_color_row(&cfg.tray_icon_color);
+    appearance.add(&tray_row);
+    page.add(&appearance);
+
     wire_tray_color(&tray_row, overlay.clone(), tray.clone());
 
-    NavigationPage::builder()
-        .title("Preferences")
-        .child(&toolbar)
-        .build()
+    page
 }
+
 
 // ---------------------------------------------------------------------------
 // Row builders
