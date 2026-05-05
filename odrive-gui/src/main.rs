@@ -21,7 +21,7 @@ use std::rc::Rc;
 
 fn main() {
     let application = Application::builder()
-        .application_id("ai.openclaw.odrive-linux")
+        .application_id("io.github.keithvassallomt.odrive-linux")
         .build();
 
     application.connect_startup(|_| {

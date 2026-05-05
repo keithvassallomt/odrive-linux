@@ -205,7 +205,7 @@ pub struct OdriveTray {
 
 impl ksni::Tray for OdriveTray {
     fn id(&self) -> String {
-        "ai.openclaw.odrive-linux".into()
+        "io.github.keithvassallomt.odrive-linux".into()
     }
 
     fn icon_name(&self) -> String {
