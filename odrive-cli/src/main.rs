@@ -248,6 +248,13 @@ const EMBLEMS: &[(&str, &str)] = &[
 /// handles both layouts.
 const TRAY_COLORS: &[&str] = &["pink", "white", "black", "darkgrey", "grey"];
 
+/// Number of animation frames per colour bundled in `odrive-icons/tray-icons/animated/<color>/`.
+/// Colours without an `animated/<color>/` directory are simply not animated;
+/// `install_tray_animation` returns 0 for them. The GUI's animation timer
+/// detects "no frames installed" by checking whether `odrive-tray-<color>-active-1`
+/// resolves to a file path on disk.
+const TRAY_ANIMATION_FRAMES: u32 = 16;
+
 fn xdg_data_home() -> String {
     std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| {
         let home = std::env::var("HOME").expect("$HOME must be set");
@@ -377,6 +384,75 @@ fn install_tray_icon(
     Ok(count)
 }
 
+/// Install the animated tray-icon frame set for one colour. The bundle
+/// is asymmetric: only `pink`, `white`, and `black` ship animation
+/// frames under `odrive-icons/tray-icons/animated/<color>/`, and the
+/// filename pattern differs per colour (pink: `infinity-N.png`;
+/// black/white: `infinity-<color>-backup-N.png`). We don't care about
+/// the prefix — the trailing `-N.png` is the only part we extract — so
+/// any well-numbered frame set works.
+///
+/// Each frame is installed as `odrive-tray-<color>-active-<N>` under
+/// hicolor's `status` category, in two places:
+/// - `256x256/status/` so high-DPI hosts get the hi-res master.
+/// - `48x48/status/` so SNI hosts on GNOME (which only walk
+///   panel-size buckets when resolving icon names — see
+///   `install_tray_icon`'s docstring) actually find the icon.
+///
+/// Source frames are 1024×1024; the dimensions don't have to match the
+/// bucket name (`gtk-update-icon-cache` and St.Icon load by file path
+/// and scale at render time) so a single-size source set is fine.
+///
+/// Returns the count of files copied (2 per frame on success). A
+/// missing `animated/<color>/` directory yields `Ok(0)` — the colour
+/// simply won't animate at runtime.
+fn install_tray_animation(
+    icons_dir: &std::path::Path,
+    hicolor: &str,
+    color: &str,
+) -> std::io::Result<usize> {
+    let frames_dir = icons_dir
+        .join("tray-icons")
+        .join("animated")
+        .join(color);
+    if !frames_dir.is_dir() {
+        return Ok(0);
+    }
+
+    // Collect (frame_n, path) pairs by extracting the trailing integer
+    // from each PNG's stem. Sort by frame_n so install order is
+    // deterministic (helps when debugging via `ls`); the runtime
+    // animation indexes by name, not by install order.
+    let mut frames: Vec<(u32, std::path::PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(&frames_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("png") {
+            continue;
+        }
+        let stem = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s,
+            None => continue,
+        };
+        let Some(n_str) = stem.rsplit('-').next() else { continue };
+        let Ok(n) = n_str.parse::<u32>() else { continue };
+        frames.push((n, path));
+    }
+    frames.sort_by_key(|(n, _)| *n);
+
+    let mut count = 0usize;
+    for (n, path) in &frames {
+        let target_name = format!("odrive-tray-{}-active-{}", color, n);
+        for size in ["256x256", "48x48"] {
+            let dst_dir = format!("{}/{}/status", hicolor, size);
+            std::fs::create_dir_all(&dst_dir)?;
+            std::fs::copy(path, format!("{}/{}.png", dst_dir, target_name))?;
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 /// Return the smallest source PNG suitable as a panel-size shim. Prefer
 /// the 256-px file inside the per-colour subdirectory; otherwise the
 /// root master. Returns `None` when neither exists (caller's
@@ -497,6 +573,7 @@ fn install_handlers() -> Result<(), Box<dyn std::error::Error>> {
         }
         for color in TRAY_COLORS {
             icon_files += install_tray_icon(&icons_dir, &hicolor, color)?;
+            icon_files += install_tray_animation(&icons_dir, &hicolor, color)?;
         }
         let _ = std::process::Command::new("gtk-update-icon-cache")
             .args(["-f", "-t"])
@@ -555,10 +632,19 @@ fn uninstall_handlers() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(|(_, stem, _)| format!("odrive-{}-cloud", stem))
         .collect();
-    let status_targets: Vec<String> = TRAY_COLORS
+    let mut status_targets: Vec<String> = TRAY_COLORS
         .iter()
         .map(|c| format!("odrive-tray-{}", c))
         .collect();
+    // Sweep animation frames too. Colours without animation just won't
+    // have files at these names; `remove_file` returns NotFound and the
+    // sweep loop silently skips. We don't need a separate "animated
+    // colours" list at uninstall time.
+    for c in TRAY_COLORS {
+        for n in 1..=TRAY_ANIMATION_FRAMES {
+            status_targets.push(format!("odrive-tray-{}-active-{}", c, n));
+        }
+    }
     let mut removed_icons = 0usize;
     if let Ok(entries) = std::fs::read_dir(&hicolor) {
         for size_dir in entries.flatten() {

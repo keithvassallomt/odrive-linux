@@ -287,6 +287,73 @@ impl Default for GlobalSettings {
     }
 }
 
+/// Snapshot of the agent's "what's currently in flight" counters as
+/// printed at the bottom of `odrive status`. The block looks like:
+///
+/// ```text
+/// Sync Requests: 0
+/// Background Requests: 0
+/// Uploads: 0
+/// Downloads: 0
+/// Trash: 0
+/// Waiting: 0
+/// Not Allowed: 0
+/// ```
+///
+/// We track the five counters that mean "real work in progress"
+/// (`is_active` returns true if any are > 0). `Trash` and `Not Allowed`
+/// aren't progress signals — Trash is queued deletions awaiting flush,
+/// Not Allowed is a permanent error bucket — so they're excluded from
+/// the activity decision. Background Requests covers folder refreshes
+/// triggered by the periodic remote scan, which is the most common
+/// "agent is doing something" state on an idle account.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncActivity {
+    pub sync_requests: u32,
+    pub background_requests: u32,
+    pub uploads: u32,
+    pub downloads: u32,
+    pub waiting: u32,
+}
+
+impl SyncActivity {
+    /// True when the agent is doing — or about to do — real work. The
+    /// tray indicator's animation is gated on this.
+    pub fn is_active(&self) -> bool {
+        self.sync_requests > 0
+            || self.background_requests > 0
+            || self.uploads > 0
+            || self.downloads > 0
+            || self.waiting > 0
+    }
+}
+
+/// Parse the activity counters out of `odrive status` text. Each line
+/// is `<Label>: <number>`; missing or non-numeric values fall back to
+/// 0 (matching the "no work" default) so a future label rewording or a
+/// truncated status response degrades to "idle" rather than panicking.
+pub fn parse_sync_activity(status_text: &str) -> SyncActivity {
+    let mut out = SyncActivity::default();
+    for line in status_text.lines() {
+        let line = line.trim();
+        let Some((label, value)) = line.rsplit_once(':') else {
+            continue;
+        };
+        let Ok(n) = value.trim().parse::<u32>() else {
+            continue;
+        };
+        match label.trim() {
+            "Sync Requests" => out.sync_requests = n,
+            "Background Requests" => out.background_requests = n,
+            "Uploads" => out.uploads = n,
+            "Downloads" => out.downloads = n,
+            "Waiting" => out.waiting = n,
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Pull the four global-settings markers out of `odrive status` text.
 /// The upstream prints lines shaped like
 /// `placeholderThreshold: neverDownload` (sometimes with extra whitespace
@@ -815,6 +882,16 @@ curl -fL "https://dl.odrive.com/odrivecli-lnx-64" | tar -xzf- -C "$od/"
         Ok(parse_global_settings(&status.sync_status))
     }
 
+    /// Snapshot of the agent's in-flight counters. Drives the tray
+    /// indicator's "currently working" animation. Falls through to the
+    /// same `get_status` shell-out that the dashboard already runs, so
+    /// adding this poll on top of an existing one doesn't double the
+    /// CLI invocation rate when callers reuse `get_status` directly.
+    pub fn get_sync_activity(&self) -> Result<SyncActivity, OdriveError> {
+        let status = self.get_status()?;
+        Ok(parse_sync_activity(&status.sync_status))
+    }
+
     pub fn get_mounts(&self) -> Result<Vec<OdriveMount>, OdriveError> {
         // The upstream odrive CLI has no `mounts` subcommand — mount info is
         // exposed via `odrive status --mounts`, which prints two lines per
@@ -1017,6 +1094,77 @@ syncEnabled: False
         assert_eq!(g.xl, d.xl);
         assert_eq!(g.auto_unsync, d.auto_unsync);
         assert_eq!(g.sync_enabled, d.sync_enabled);
+    }
+
+    #[test]
+    fn parse_sync_activity_real_status_text_idle() {
+        // Real `odrive status` output for an idle agent — every counter
+        // is zero, so `is_active()` is false.
+        let s = "\
+isActivated: True                                               hasSession: True
+syncEnabled: True                                                            Mounts: 1
+
+Sync Requests: 0
+Background Requests: 0
+Uploads: 0
+Downloads: 0
+Trash: 0
+Waiting: 0
+Not Allowed: 0
+";
+        let a = parse_sync_activity(s);
+        assert_eq!(a, SyncActivity::default());
+        assert!(!a.is_active());
+    }
+
+    #[test]
+    fn parse_sync_activity_real_status_text_active() {
+        // Mid-sync snapshot: a couple of counters non-zero. Trash and
+        // Not Allowed are non-zero too but they don't influence is_active.
+        let s = "\
+Sync Requests: 3
+Background Requests: 1
+Uploads: 0
+Downloads: 12
+Trash: 5
+Waiting: 2
+Not Allowed: 1
+";
+        let a = parse_sync_activity(s);
+        assert_eq!(a.sync_requests, 3);
+        assert_eq!(a.background_requests, 1);
+        assert_eq!(a.uploads, 0);
+        assert_eq!(a.downloads, 12);
+        assert_eq!(a.waiting, 2);
+        assert!(a.is_active());
+    }
+
+    #[test]
+    fn parse_sync_activity_only_background_requests_counts_as_active() {
+        // Folder-refresh sweep with no user-initiated work — still
+        // "active" so the tray animates rather than appearing idle while
+        // the agent is clearly doing something.
+        let s = "Background Requests: 1\n";
+        let a = parse_sync_activity(s);
+        assert!(a.is_active());
+    }
+
+    #[test]
+    fn parse_sync_activity_missing_counters_fall_back_to_zero() {
+        // No counter lines at all → every field 0, is_active false.
+        let a = parse_sync_activity("isActivated: True\nemail: x@y\n");
+        assert_eq!(a, SyncActivity::default());
+        assert!(!a.is_active());
+    }
+
+    #[test]
+    fn parse_sync_activity_non_numeric_value_ignored() {
+        // Garbage value → that field stays at 0; the others still parse.
+        let s = "Sync Requests: pending\nDownloads: 4\n";
+        let a = parse_sync_activity(s);
+        assert_eq!(a.sync_requests, 0);
+        assert_eq!(a.downloads, 4);
+        assert!(a.is_active());
     }
 
     #[test]
