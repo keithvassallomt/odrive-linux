@@ -222,6 +222,11 @@ const DESKTOP_NAME: &str = "odrive-linux-open.desktop";
 const PLACEHOLDER_FILE_ICON: &str = "odrive-cloud-file";
 const PLACEHOLDER_FOLDER_ICON: &str = "odrive-cloud-folder";
 
+/// Icon name installed under `apps/` for use as the parent label of the
+/// Nautilus right-click "Odrive ▸" submenu. Bundled at 16/32/256/512/1024
+/// from `odrive-icons/app-icon/`.
+const APP_MENU_ICON: &str = "odrive-menu";
+
 /// Cloud-file-type sub-MIMEs. Each entry: (icons subdir, mime/icon stem,
 /// glob patterns). The MIME stems become `application/vnd.odrive.<stem>-cloud`
 /// (e.g. `gdoc-cloud`); icons under `~/.local/share/icons/hicolor/<size>/mimetypes/`
@@ -699,6 +704,12 @@ fn install_handlers() -> Result<(), Box<dyn std::error::Error>> {
             "cloud-folder",
             PLACEHOLDER_FOLDER_ICON,
         )?;
+        icon_files += install_icon_set(
+            &icons_dir.join("app-icon"),
+            &hicolor,
+            "apps",
+            APP_MENU_ICON,
+        )?;
         let _ = std::process::Command::new("gtk-update-icon-cache")
             .args(["-f", "-t"])
             .arg(&hicolor)
@@ -795,6 +806,7 @@ fn uninstall_handlers() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let places_targets: Vec<String> = vec![odrive_core::MOUNT_FOLDER_ICON_NAME.to_string()];
+    let apps_targets: Vec<String> = vec![APP_MENU_ICON.to_string()];
     let mut removed_icons = 0usize;
     if let Ok(entries) = std::fs::read_dir(&hicolor) {
         for size_dir in entries.flatten() {
@@ -803,6 +815,7 @@ fn uninstall_handlers() -> Result<(), Box<dyn std::error::Error>> {
                 ("mimetypes", &mime_targets),
                 ("status", &status_targets),
                 ("places", &places_targets),
+                ("apps", &apps_targets),
             ] {
                 let cat_dir = size_dir.path().join(category);
                 if !cat_dir.is_dir() {

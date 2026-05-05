@@ -203,42 +203,69 @@ class OdriveExtension(GObject.GObject, Nautilus.MenuProvider, Nautilus.InfoProvi
             return []
 
         mounts = self.get_mounts()
-        items = []
-
         placeholders = []
         regular_files = []
+        in_mount_any = []
 
         for file in files:
             path = file.get_location().get_path()
             name = file.get_name()
-            
+
             is_placeholder = name.endswith('.cloud') or name.endswith('.cloudf')
             in_mount = any(path.startswith(m) for m in mounts)
 
             if is_placeholder:
                 placeholders.append(path)
+                in_mount_any.append(path)
             elif in_mount:
                 regular_files.append(path)
+                in_mount_any.append(path)
 
+        # Nothing in this selection lives under an odrive mount — no menu.
+        if not in_mount_any:
+            return []
+
+        submenu = Nautilus.Menu()
+
+        # Sync — only meaningful for placeholders (downloads them).
         if placeholders:
             sync_item = Nautilus.MenuItem(
-                name='OdriveSyncItem',
-                label='Sync with odrive',
+                name='OdriveMenu::Sync',
+                label='Sync',
                 tip='Download from cloud'
             )
             sync_item.connect('activate', self.on_sync_clicked, placeholders)
-            items.append(sync_item)
+            submenu.append_item(sync_item)
 
+        # Unsync — only meaningful for materialised files (reverts to placeholder).
         if regular_files:
             unsync_item = Nautilus.MenuItem(
-                name='OdriveUnsyncItem',
-                label='Unsync (odrive)',
+                name='OdriveMenu::Unsync',
+                label='Unsync',
                 tip='Revert to placeholder'
             )
             unsync_item.connect('activate', self.on_unsync_clicked, regular_files)
-            items.append(unsync_item)
+            submenu.append_item(unsync_item)
 
-        return items
+        # Refresh — works on anything inside a mount.
+        refresh_item = Nautilus.MenuItem(
+            name='OdriveMenu::Refresh',
+            label='Refresh',
+            tip='Re-check remote for changes'
+        )
+        refresh_item.connect('activate', self.on_refresh_clicked, in_mount_any)
+        submenu.append_item(refresh_item)
+
+        # Parent label with the bundled odrive-menu icon (installed under
+        # hicolor/<size>/apps/ by `odrive-cli install-handlers`).
+        parent = Nautilus.MenuItem(
+            name='OdriveMenu',
+            label='Odrive',
+            tip='odrive actions',
+            icon='odrive-menu',
+        )
+        parent.set_submenu(submenu)
+        return [parent]
 
     def on_sync_clicked(self, menu, paths):
         for path in paths:
@@ -247,6 +274,10 @@ class OdriveExtension(GObject.GObject, Nautilus.MenuProvider, Nautilus.InfoProvi
     def on_unsync_clicked(self, menu, paths):
         for path in paths:
             subprocess.run([self.cli_path, 'unsync', path], check=False)
+
+    def on_refresh_clicked(self, menu, paths):
+        for path in paths:
+            subprocess.run([self.cli_path, 'refresh', path], check=False)
 
     # InfoProvider — applies emblems and pads placeholders on the fly.
     #
