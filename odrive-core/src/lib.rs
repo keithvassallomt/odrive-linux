@@ -789,6 +789,12 @@ curl -fL "https://dl.odrive.com/odrivecli-lnx-64" | tar -xzf- -C "$od/"
             .output()?;
 
         if output.status.success() {
+            // Best-effort: tell the file manager to render this folder
+            // with the bundled main-folder icon. Failure is non-fatal —
+            // a missing `gio` binary or a non-GVFS environment just
+            // means Nautilus uses the default folder icon, same as
+            // before this hook was added.
+            let _ = set_folder_custom_icon(local, MOUNT_FOLDER_ICON_NAME);
             Ok(String::from_utf8_lossy(&output.stdout).to_string())
         } else {
             Err(OdriveError::CliError(String::from_utf8_lossy(&output.stderr).to_string()))
@@ -805,6 +811,11 @@ curl -fL "https://dl.odrive.com/odrivecli-lnx-64" | tar -xzf- -C "$od/"
             .output()?;
 
         if output.status.success() {
+            // Strip the custom-icon metadata we set on mount. The
+            // folder may stay around populated with already-synced
+            // files, but it's no longer an odrive mount, so the
+            // distinctive icon would be misleading. Best-effort.
+            let _ = unset_folder_custom_icon(local);
             Ok(String::from_utf8_lossy(&output.stdout).to_string())
         } else {
             Err(OdriveError::CliError(String::from_utf8_lossy(&output.stderr).to_string()))
@@ -987,6 +998,50 @@ pub fn pad_placeholder(path: &Path) -> std::io::Result<bool> {
     let mut file = fs::OpenOptions::new().append(true).open(path)?;
     file.write_all(&[0u8])?;
     Ok(true)
+}
+
+/// Icon-theme name registered by `odrive-cli install-handlers` for the
+/// odrive-mount-folder rendering. The same constant feeds both ends:
+/// the install-handlers code that copies the PNG into the icon theme
+/// and the GVFS-metadata setter that points each mount at it.
+pub const MOUNT_FOLDER_ICON_NAME: &str = "odrive-mount-folder";
+
+/// Mark `local_path` (typically an odrive mount root) with a custom
+/// icon name via GVFS metadata. Nautilus / Files honours
+/// `metadata::custom-icon-name` when rendering folder icons, so as
+/// long as the named icon is in the user's icon theme the folder
+/// renders with our bundled main-folder art instead of the generic
+/// folder icon.
+///
+/// Best-effort. Failures (no `gio` binary, non-GVFS environment, the
+/// path not under a GVFS-aware mount) are returned as `Err` for
+/// callers that want to surface them, but every current call site
+/// ignores the result — degrading to the default folder icon is
+/// preferable to bubbling a metadata error to the user.
+pub fn set_folder_custom_icon(local_path: &str, icon_name: &str) -> std::io::Result<()> {
+    let status = Command::new("gio")
+        .arg("set")
+        .arg(local_path)
+        .arg("metadata::custom-icon-name")
+        .arg(icon_name)
+        .status()?;
+    if !status.success() {
+        return Err(std::io::Error::other("gio set metadata::custom-icon-name failed"));
+    }
+    Ok(())
+}
+
+/// Inverse of `set_folder_custom_icon`: strip the custom-icon metadata
+/// from `local_path`. Called from `unmount` so a folder no longer
+/// associated with odrive doesn't keep the distinctive icon.
+pub fn unset_folder_custom_icon(local_path: &str) -> std::io::Result<()> {
+    let status = Command::new("gio")
+        .args(["set", "-t", "unset", local_path, "metadata::custom-icon-name"])
+        .status()?;
+    if !status.success() {
+        return Err(std::io::Error::other("gio set -t unset failed"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -384,6 +384,41 @@ fn install_tray_icon(
     Ok(count)
 }
 
+/// Install the bundled main-folder icon under hicolor's `places`
+/// category as the name `odrive-mount-folder` (= `MOUNT_FOLDER_ICON_NAME`
+/// in odrive-core, which `OdriveAgent::mount` references when setting
+/// per-folder GVFS metadata). The asset is a single 512×512 PNG, so
+/// we drop copies into 512/256/48 size dirs — Nautilus picks the best
+/// fit at render time and the 48 dir doubles as the small list-view
+/// rendering size. `places/` is the canonical hicolor category for
+/// folder-style icons (e.g. `folder-pictures`, `folder-documents`).
+///
+/// Returns the count of files copied. A missing source PNG yields
+/// `Ok(0)` — same defensive shape as the other icon installers.
+fn install_mount_folder_icon(
+    icons_dir: &std::path::Path,
+    hicolor: &str,
+) -> std::io::Result<usize> {
+    let src = icons_dir
+        .join("mime_icons")
+        .join("main-folder")
+        .join("main-folder-512x512.png");
+    if !src.is_file() {
+        return Ok(0);
+    }
+    let mut count = 0usize;
+    for size in ["512x512", "256x256", "48x48"] {
+        let dst_dir = format!("{}/{}/places", hicolor, size);
+        std::fs::create_dir_all(&dst_dir)?;
+        std::fs::copy(
+            &src,
+            format!("{}/{}.png", dst_dir, odrive_core::MOUNT_FOLDER_ICON_NAME),
+        )?;
+        count += 1;
+    }
+    Ok(count)
+}
+
 /// Install the animated tray-icon frame set for one colour. The bundle
 /// is asymmetric: only `pink`, `white`, and `black` ship animation
 /// frames under `odrive-icons/tray-icons/animated/<color>/`, and the
@@ -575,12 +610,33 @@ fn install_handlers() -> Result<(), Box<dyn std::error::Error>> {
             icon_files += install_tray_icon(&icons_dir, &hicolor, color)?;
             icon_files += install_tray_animation(&icons_dir, &hicolor, color)?;
         }
+        icon_files += install_mount_folder_icon(&icons_dir, &hicolor)?;
         let _ = std::process::Command::new("gtk-update-icon-cache")
             .args(["-f", "-t"])
             .arg(&hicolor)
             .status();
     } else {
         eprintln!("Note: odrive-icons/ not found alongside the binary — emblems and cloud-file-type icons skipped.");
+    }
+
+    // Apply the main-folder icon to every existing mount. New mounts
+    // get this automatically via OdriveAgent::mount; this back-fills
+    // any mounts the user already had before install-handlers ran.
+    // Best-effort: a non-GVFS environment or a missing `gio` binary
+    // just leaves the default folder icon in place.
+    let agent = OdriveAgent::new();
+    let mut tagged = 0usize;
+    if let Ok(mounts) = agent.get_mounts() {
+        for m in mounts {
+            if odrive_core::set_folder_custom_icon(
+                &m.local_path,
+                odrive_core::MOUNT_FOLDER_ICON_NAME,
+            )
+            .is_ok()
+            {
+                tagged += 1;
+            }
+        }
     }
 
     let _ = std::process::Command::new("update-mime-database")
@@ -601,6 +657,9 @@ fn install_handlers() -> Result<(), Box<dyn std::error::Error>> {
     println!("  {}", desktop_path);
     if icon_files > 0 {
         println!("  {} icon files under {}", icon_files, hicolor);
+    }
+    if tagged > 0 {
+        println!("Tagged {} existing mount(s) with the main-folder icon.", tagged);
     }
     println!("Default app for placeholder MIMEs set to {}.", DESKTOP_NAME);
     println!("Restart Nautilus (`nautilus -q`) to pick up the new MIME types and icons.");
@@ -645,6 +704,7 @@ fn uninstall_handlers() -> Result<(), Box<dyn std::error::Error>> {
             status_targets.push(format!("odrive-tray-{}-active-{}", c, n));
         }
     }
+    let places_targets: Vec<String> = vec![odrive_core::MOUNT_FOLDER_ICON_NAME.to_string()];
     let mut removed_icons = 0usize;
     if let Ok(entries) = std::fs::read_dir(&hicolor) {
         for size_dir in entries.flatten() {
@@ -652,6 +712,7 @@ fn uninstall_handlers() -> Result<(), Box<dyn std::error::Error>> {
                 ("emblems", &emblem_targets),
                 ("mimetypes", &mime_targets),
                 ("status", &status_targets),
+                ("places", &places_targets),
             ] {
                 let cat_dir = size_dir.path().join(category);
                 if !cat_dir.is_dir() {
@@ -674,6 +735,18 @@ fn uninstall_handlers() -> Result<(), Box<dyn std::error::Error>> {
             .arg(&hicolor)
             .status();
         removed_any = true;
+    }
+
+    // Strip the GVFS custom-icon metadata from any mounts we tagged
+    // during install. Best-effort: a non-GVFS environment or a
+    // missing `gio` simply leaves the metadata in place — harmless,
+    // since the icon name no longer resolves and Nautilus falls back
+    // to the default folder icon.
+    let agent = OdriveAgent::new();
+    if let Ok(mounts) = agent.get_mounts() {
+        for m in mounts {
+            let _ = odrive_core::unset_folder_custom_icon(&m.local_path);
+        }
     }
 
     if removed_any {
