@@ -200,37 +200,9 @@ fn build_dashboard_page(
     let page = PreferencesPage::new();
     page.set_margin_top(12);
 
-    // ----- Agent group -----
-    let agent_group = PreferencesGroup::builder()
-        .title("Agent")
-        .description("Daemon lifecycle and the local placeholder index.")
-        .build();
-
-    let status_row = ActionRow::builder()
-        .title("Status")
-        .subtitle("Checking…")
-        .build();
-    let start_stop_btn = Button::builder()
-        .label("Start")
-        .valign(gtk::Align::Center)
-        .build();
-    start_stop_btn.add_css_class("pill");
-    status_row.add_suffix(&start_stop_btn);
-    agent_group.add(&status_row);
-
-    let db_row = ActionRow::builder()
-        .title("Placeholder database")
-        .subtitle("0 tracked items")
-        .build();
-    let scan_btn = Button::builder()
-        .label("Scan now")
-        .valign(gtk::Align::Center)
-        .build();
-    scan_btn.add_css_class("pill");
-    db_row.add_suffix(&scan_btn);
-    agent_group.add(&db_row);
-
-    page.add(&agent_group);
+    // The Agent + Placeholder-DB blocks that used to live here moved
+    // into Preferences → Status (`settings_page::build_status_page`)
+    // when the dashboard became a focused-on-mounts surface.
 
     // ----- Mounts group -----
     let mounts_group = PreferencesGroup::builder()
@@ -253,28 +225,11 @@ fn build_dashboard_page(
     // closures referencing its own path, with no need to diff.
     let update_ui = {
         let agent = agent.clone();
-        let status_row = status_row.clone();
-        let start_stop_btn = start_stop_btn.clone();
-        let db_row = db_row.clone();
         let mounts_group = mounts_group.clone();
         let overlay = overlay.clone();
         let mounted_children = mounted_children.clone();
         let nav_for_rows = nav.clone();
         move || {
-            let is_running = agent.is_running();
-            status_row.set_subtitle(if is_running { "Running" } else { "Stopped" });
-            start_stop_btn.set_label(if is_running { "Stop" } else { "Start" });
-            if is_running {
-                start_stop_btn.remove_css_class("suggested-action");
-            } else {
-                start_stop_btn.add_css_class("suggested-action");
-            }
-
-            if let Ok(db) = OdriveDb::open(agent.get_db_path()) {
-                let count = db.count_placeholders().unwrap_or(0);
-                db_row.set_subtitle(&format!("{} tracked items", count));
-            }
-
             // Drop the previous tick's children, then rebuild.
             for child in mounted_children.borrow_mut().drain(..) {
                 mounts_group.remove(&child);
@@ -333,52 +288,6 @@ fn build_dashboard_page(
         move || {
             update();
             gtk::glib::ControlFlow::Continue
-        }
-    });
-
-    start_stop_btn.connect_clicked({
-        let agent = agent.clone();
-        let update = update_ui.clone();
-        let overlay = overlay.clone();
-        move |_| {
-            if agent.is_running() {
-                let _ = agent.stop();
-            } else {
-                let _ = agent.start();
-            }
-            update();
-            overlay.add_toast(Toast::new("Status updated"));
-        }
-    });
-
-    scan_btn.connect_clicked({
-        let agent = agent.clone();
-        let update = update_ui.clone();
-        let overlay = overlay.clone();
-        move |btn| {
-            btn.set_sensitive(false);
-            btn.set_label("Scanning…");
-            let agent_for_worker = agent.as_ref().clone();
-            let mount_path = agent.default_mount_path();
-            let overlay_for_done = overlay.clone();
-            let update_for_done = update.clone();
-            let btn_for_done = btn.clone();
-            worker::spawn(
-                move || agent_for_worker.scan_placeholders(&mount_path),
-                move |result| {
-                    btn_for_done.set_sensitive(true);
-                    btn_for_done.set_label("Scan now");
-                    match result {
-                        Ok(count) => {
-                            overlay_for_done
-                                .add_toast(Toast::new(&format!("Found {} placeholders", count)));
-                            update_for_done();
-                        }
-                        Err(e) => overlay_for_done
-                            .add_toast(Toast::new(&format!("Scan failed: {}", e))),
-                    }
-                },
-            );
         }
     });
 

@@ -17,16 +17,16 @@ use crate::indicator::TrayController;
 use libadwaita as adw;
 use adw::prelude::*;
 use adw::{
-    ApplicationWindow, ComboRow, HeaderBar, NavigationPage, NavigationSplitView,
+    ActionRow, ApplicationWindow, ComboRow, HeaderBar, NavigationPage, NavigationSplitView,
     PreferencesGroup, PreferencesPage, StatusPage, Toast, ToastOverlay, ToolbarView,
     WindowTitle,
 };
 use adw::gtk::{
-    self, Application, Label, ListBox, ListBoxRow, SelectionMode, Stack,
+    self, glib, Application, Button, Label, ListBox, ListBoxRow, SelectionMode, Stack,
     StackTransitionType, StringList,
 };
 use odrive_core::{
-    AutoUnsyncThreshold, OdriveAgent, OdriveConfig, PlaceholderThreshold, XlThreshold,
+    AutoUnsyncThreshold, OdriveAgent, OdriveConfig, OdriveDb, PlaceholderThreshold, XlThreshold,
     DEFAULT_TRAY_ICON_COLOR, TRAY_ICON_COLORS,
 };
 use std::cell::RefCell;
@@ -121,9 +121,12 @@ pub fn present(
         .build();
     split.set_content(Some(&content_page));
 
-    // Build each section's content and add to the stack.
+    // Build each section's content and add to the stack. Status needs
+    // a reference to the enclosing window so its background poll can
+    // be cancelled on close — passing &window through the dispatch
+    // keeps the surface area uniform.
     for (name, _) in SECTIONS {
-        let child = build_section_content(name, &agent, &toast_overlay, &tray);
+        let child = build_section_content(name, &agent, &toast_overlay, &tray, &window);
         stack.add_named(&child, Some(*name));
     }
 
@@ -155,6 +158,7 @@ fn build_section_content(
     agent: &Rc<OdriveAgent>,
     overlay: &ToastOverlay,
     tray: &Rc<TrayController>,
+    window: &ApplicationWindow,
 ) -> gtk::Widget {
     match name {
         "general" => build_general_page(agent, overlay).upcast(),
@@ -165,12 +169,7 @@ fn build_section_content(
             .description("Advanced settings will live here.")
             .build()
             .upcast(),
-        "status" => StatusPage::builder()
-            .icon_name("emblem-default-symbolic")
-            .title("Status")
-            .description("Agent status and logs will live here.")
-            .build()
-            .upcast(),
+        "status" => build_status_page(agent, overlay, window).upcast(),
         _ => StatusPage::new().upcast(),
     }
 }
@@ -259,6 +258,151 @@ fn build_appearance_page(overlay: &ToastOverlay, tray: &Rc<TrayController>) -> P
     page.add(&emblems_group);
     wire_emblem_switch(&synced_row, EmblemKind::Synced, overlay.clone());
     wire_emblem_switch(&syncing_row, EmblemKind::Syncing, overlay.clone());
+
+    page
+}
+
+/// Status section: live agent state + the local placeholder index.
+/// Mirrors what used to live on the dashboard's top group; lives in
+/// Preferences now because the dashboard becomes a tabbed shell where
+/// "agent housekeeping" doesn't earn front-page real estate.
+///
+/// A 5 s `glib::timeout_add_seconds_local` poll refreshes the rows.
+/// The poll's `SourceId` is removed in `connect_close_request` on the
+/// enclosing window so a closed Preferences window doesn't leak a
+/// timer holding clones of its own widgets.
+fn build_status_page(
+    agent: &Rc<OdriveAgent>,
+    overlay: &ToastOverlay,
+    window: &ApplicationWindow,
+) -> PreferencesPage {
+    let page = PreferencesPage::new();
+    page.set_margin_top(12);
+
+    // ----- Agent group -----
+    let agent_group = PreferencesGroup::builder()
+        .title("Agent")
+        .description("Daemon lifecycle and the local placeholder index.")
+        .build();
+
+    let status_row = ActionRow::builder()
+        .title("Status")
+        .subtitle("Checking…")
+        .build();
+    let start_stop_btn = Button::builder()
+        .label("Start")
+        .valign(gtk::Align::Center)
+        .build();
+    start_stop_btn.add_css_class("pill");
+    status_row.add_suffix(&start_stop_btn);
+    agent_group.add(&status_row);
+
+    let db_row = ActionRow::builder()
+        .title("Placeholder database")
+        .subtitle("0 tracked items")
+        .build();
+    let scan_btn = Button::builder()
+        .label("Scan now")
+        .valign(gtk::Align::Center)
+        .build();
+    scan_btn.add_css_class("pill");
+    db_row.add_suffix(&scan_btn);
+    agent_group.add(&db_row);
+
+    page.add(&agent_group);
+
+    // Refresh closure: pulls is_running, paints status_row + button
+    // label, and re-counts the placeholder DB. Wrapped in `Rc` so the
+    // start/stop and scan handlers can fire it on demand alongside
+    // the periodic poll.
+    let refresh: Rc<dyn Fn()> = {
+        let agent = agent.clone();
+        let status_row = status_row.clone();
+        let start_stop_btn = start_stop_btn.clone();
+        let db_row = db_row.clone();
+        Rc::new(move || {
+            let is_running = agent.is_running();
+            status_row.set_subtitle(if is_running { "Running" } else { "Stopped" });
+            start_stop_btn.set_label(if is_running { "Stop" } else { "Start" });
+            if is_running {
+                start_stop_btn.remove_css_class("suggested-action");
+            } else {
+                start_stop_btn.add_css_class("suggested-action");
+            }
+            if let Ok(db) = OdriveDb::open(agent.get_db_path()) {
+                let count = db.count_placeholders().unwrap_or(0);
+                db_row.set_subtitle(&format!("{} tracked items", count));
+            }
+        })
+    };
+    refresh();
+
+    start_stop_btn.connect_clicked({
+        let agent = agent.clone();
+        let refresh = refresh.clone();
+        let overlay = overlay.clone();
+        move |_| {
+            if agent.is_running() {
+                let _ = agent.stop();
+            } else {
+                let _ = agent.start();
+            }
+            refresh();
+            overlay.add_toast(Toast::new("Status updated"));
+        }
+    });
+
+    scan_btn.connect_clicked({
+        let agent = agent.clone();
+        let refresh = refresh.clone();
+        let overlay = overlay.clone();
+        move |btn| {
+            btn.set_sensitive(false);
+            btn.set_label("Scanning…");
+            let agent_for_worker = agent.as_ref().clone();
+            let mount_path = agent.default_mount_path();
+            let overlay_for_done = overlay.clone();
+            let refresh_for_done = refresh.clone();
+            let btn_for_done = btn.clone();
+            crate::worker::spawn(
+                move || agent_for_worker.scan_placeholders(&mount_path),
+                move |result| {
+                    btn_for_done.set_sensitive(true);
+                    btn_for_done.set_label("Scan now");
+                    match result {
+                        Ok(count) => {
+                            overlay_for_done
+                                .add_toast(Toast::new(&format!("Found {} placeholders", count)));
+                            refresh_for_done();
+                        }
+                        Err(e) => overlay_for_done
+                            .add_toast(Toast::new(&format!("Scan failed: {}", e))),
+                    }
+                },
+            );
+        }
+    });
+
+    // 5 s poll. Stash the SourceId so the close handler can cancel it;
+    // letting the timer keep firing after the window is destroyed
+    // would be a slow memory leak (every closure clone of status_row /
+    // db_row / start_stop_btn would survive for the rest of the
+    // process's life).
+    let source = glib::timeout_add_seconds_local(5, {
+        let refresh = refresh.clone();
+        move || {
+            refresh();
+            glib::ControlFlow::Continue
+        }
+    });
+    let source_holder: Rc<RefCell<Option<glib::SourceId>>> =
+        Rc::new(RefCell::new(Some(source)));
+    window.connect_close_request(move |_| {
+        if let Some(s) = source_holder.borrow_mut().take() {
+            s.remove();
+        }
+        glib::Propagation::Proceed
+    });
 
     page
 }
