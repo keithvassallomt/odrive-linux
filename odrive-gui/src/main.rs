@@ -11,7 +11,7 @@ use adw::gtk as gtk;
 use adw::{
     ActionRow, ApplicationWindow, HeaderBar, MessageDialog, NavigationPage,
     NavigationView, PreferencesGroup, PreferencesPage, ResponseAppearance,
-    StatusPage, Toast, ToastOverlay, ToolbarView, WindowTitle,
+    StatusPage, Toast, ToastOverlay, ToolbarView,
 };
 use gtk::{gdk, gio, Application, Button, CssProvider, MenuButton};
 use odrive_core::{OdriveAgent, OdriveDb};
@@ -175,13 +175,9 @@ fn build_dashboard_page(
     let toolbar = ToolbarView::new();
 
     let header = HeaderBar::new();
-    let title = WindowTitle::new("odrive Manager", "");
-    header.set_title_widget(Some(&title));
 
     // Primary menu (hamburger) on the right — current GNOME idiom for
-    // app-level commands. Houses Preferences and About; future entries
-    // (Pause / Resume, Quit on the panel-indicator side) will land here
-    // too.
+    // app-level commands. Houses Preferences and About.
     let menu = primary_menu(&agent, &overlay, &tray);
     let menu_btn = MenuButton::builder()
         .icon_name("open-menu-symbolic")
@@ -192,38 +188,91 @@ fn build_dashboard_page(
     install_menu_actions(&app, menu.1);
     header.pack_start(&menu_btn);
 
-    toolbar.add_top_bar(&header);
+    // Top-level shell is now four tabs: Mount & Sync (the original
+    // mounts list + folder navigation), Backup, Encrypt, Trash. The
+    // latter three are stub StatusPages today — they'll get real
+    // content as those features land. The ViewSwitcher is forced to
+    // NARROW policy so the tabs render icon-only regardless of window
+    // width (matches the user's spec: "Tabs use icons, not text").
+    let stack = adw::ViewStack::new();
 
-    // PreferencesPage normally clamps content to 600px and centres it; on
-    // GNOME 49's Adw build the default top padding under a HeaderBar is
-    // tight, so add explicit breathing room. We also nudge the title from
-    // each group up so they don't kiss the headerbar.
+    let mount_sync = build_mount_sync_page(agent.clone(), overlay.clone(), nav.clone());
+    stack
+        .add_titled_with_icon(&mount_sync, Some("mounts"), "Mount & Sync", "folder-symbolic")
+        .set_icon_name(Some("folder-symbolic"));
+
+    let backup = stub_status_page(
+        "Backup",
+        "Backup configuration will live here.",
+        "drive-harddisk-symbolic",
+    );
+    stack
+        .add_titled_with_icon(&backup, Some("backup"), "Backup", "drive-harddisk-symbolic")
+        .set_icon_name(Some("drive-harddisk-symbolic"));
+
+    let encrypt = stub_status_page(
+        "Encrypt",
+        "Encryption configuration will live here.",
+        "channel-secure-symbolic",
+    );
+    stack
+        .add_titled_with_icon(&encrypt, Some("encrypt"), "Encrypt", "channel-secure-symbolic")
+        .set_icon_name(Some("channel-secure-symbolic"));
+
+    let trash = stub_status_page(
+        "Trash",
+        "Trash management will live here.",
+        "user-trash-symbolic",
+    );
+    stack
+        .add_titled_with_icon(&trash, Some("trash"), "Trash", "user-trash-symbolic")
+        .set_icon_name(Some("user-trash-symbolic"));
+
+    let switcher = adw::ViewSwitcher::builder()
+        .stack(&stack)
+        .policy(adw::ViewSwitcherPolicy::Narrow)
+        .build();
+    header.set_title_widget(Some(&switcher));
+
+    toolbar.add_top_bar(&header);
+    toolbar.set_content(Some(&stack));
+
+    NavigationPage::builder()
+        .title("odrive Manager")
+        .child(&toolbar)
+        .can_pop(false)
+        .build()
+}
+
+/// Build the **Mount & Sync** tab — the existing mounts list plus its
+/// 5 s refresh poll. Sync-rule listing (Phase D) lands here too.
+/// Carved out of `build_dashboard_page` when the dashboard became a
+/// tabbed shell.
+fn build_mount_sync_page(
+    agent: Rc<OdriveAgent>,
+    overlay: ToastOverlay,
+    nav: NavigationView,
+) -> PreferencesPage {
     let page = PreferencesPage::new();
     page.set_margin_top(12);
 
-    // The Agent + Placeholder-DB blocks that used to live here moved
-    // into Preferences → Status (`settings_page::build_status_page`)
-    // when the dashboard became a focused-on-mounts surface.
-
-    // ----- Mounts group -----
     let mounts_group = PreferencesGroup::builder()
         .title("Mounts")
         .description("Local folders mirrored from your odrive cloud account.")
         .build();
     page.add(&mounts_group);
 
-    toolbar.set_content(Some(&page));
-
     // Track every widget we've added to `mounts_group` so we can remove
     // exactly those on the next tick. `PreferencesGroup.first_child()`
     // returns its internal scaffolding box, not the rows we added —
     // walking that tree blind triggers Adwaita-CRITICAL warnings.
-    let mounted_children: Rc<RefCell<Vec<gtk::Widget>>> = Rc::new(RefCell::new(Vec::new()));
+    let mounted_children: Rc<RefCell<Vec<gtk::Widget>>> =
+        Rc::new(RefCell::new(Vec::new()));
 
-    // Update closure — refreshes the agent group, then rebuilds the
-    // mounts group from scratch each tick. Rebuilding from scratch
-    // keeps the wiring simple: each mount's row carries its own
-    // closures referencing its own path, with no need to diff.
+    // Update closure — rebuilds the mounts group from scratch each
+    // tick. Rebuilding from scratch keeps the wiring simple: each
+    // mount's row carries its own closures referencing its own path,
+    // with no need to diff.
     let update_ui = {
         let agent = agent.clone();
         let mounts_group = mounts_group.clone();
@@ -231,7 +280,6 @@ fn build_dashboard_page(
         let mounted_children = mounted_children.clone();
         let nav_for_rows = nav.clone();
         move || {
-            // Drop the previous tick's children, then rebuild.
             for child in mounted_children.borrow_mut().drain(..) {
                 mounts_group.remove(&child);
             }
@@ -277,13 +325,11 @@ fn build_dashboard_page(
 
     update_ui();
 
-    // Background poll — refreshes status, placeholder count, and the
-    // mount list every 5s so external state changes (a sync completing,
-    // the agent restarting, a fresh mount) surface without requiring the
-    // user to click. Each tick runs the same synchronous shell-outs the
-    // button handlers do, so on a slow agent response the UI may briefly
-    // stutter. If that becomes visible, move the IO to a worker thread
-    // and post results back via glib::idle_add_local.
+    // Background poll — refreshes the mount list every 5s so external
+    // state changes (a sync completing, the agent restarting, a fresh
+    // mount) surface without requiring the user to click. Each tick
+    // runs the same synchronous shell-outs the button handlers do, so
+    // on a slow agent response the UI may briefly stutter.
     gtk::glib::timeout_add_seconds_local(5, {
         let update = update_ui.clone();
         move || {
@@ -292,10 +338,17 @@ fn build_dashboard_page(
         }
     });
 
-    NavigationPage::builder()
-        .title("odrive Manager")
-        .child(&toolbar)
-        .can_pop(false)
+    page
+}
+
+/// Placeholder content for the Backup / Encrypt / Trash tabs.
+/// Each lands as a real `PreferencesPage` once the corresponding
+/// feature is wired up.
+fn stub_status_page(title: &str, description: &str, icon_name: &str) -> StatusPage {
+    StatusPage::builder()
+        .icon_name(icon_name)
+        .title(title)
+        .description(description)
         .build()
 }
 
