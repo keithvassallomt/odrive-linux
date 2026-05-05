@@ -14,7 +14,7 @@ use adw::{
     StatusPage, Toast, ToastOverlay, ToolbarView,
 };
 use gtk::{gdk, gio, Application, Button, CssProvider, MenuButton};
-use odrive_core::{OdriveAgent, OdriveDb};
+use odrive_core::{FolderRule, FolderSyncThreshold, OdriveAgent, OdriveDb};
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
@@ -262,24 +262,48 @@ fn build_mount_sync_page(
         .build();
     page.add(&mounts_group);
 
-    // Track every widget we've added to `mounts_group` so we can remove
+    // Sync Rules: every per-folder rule the user has set via the
+    // Manager. The rules listing is recursively addressable — each
+    // row's body click jumps straight to the corresponding folder's
+    // detail page (same one the mount drill-in uses) so the rule's
+    // editor is one click away. Per-row ellipsis menu offers Open,
+    // Pause/Resume, and Delete.
+    let rules_group = PreferencesGroup::builder()
+        .title("Sync Rules")
+        .description("Per-folder auto-download rules set via this Manager.")
+        .build();
+    page.add(&rules_group);
+
+    // Track every widget we've added to each group so we can remove
     // exactly those on the next tick. `PreferencesGroup.first_child()`
     // returns its internal scaffolding box, not the rows we added —
     // walking that tree blind triggers Adwaita-CRITICAL warnings.
     let mounted_children: Rc<RefCell<Vec<gtk::Widget>>> =
         Rc::new(RefCell::new(Vec::new()));
+    let rule_children: Rc<RefCell<Vec<gtk::Widget>>> =
+        Rc::new(RefCell::new(Vec::new()));
 
-    // Update closure — rebuilds the mounts group from scratch each
-    // tick. Rebuilding from scratch keeps the wiring simple: each
-    // mount's row carries its own closures referencing its own path,
-    // with no need to diff.
-    let update_ui = {
+    // Forward declaration so closures can reference the refresh
+    // closure before we build it. We bind it after the closure
+    // definition because the rule-row builder needs the refresh
+    // closure to schedule re-renders post-action.
+    let refresh_holder: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+
+    // Update closure — rebuilds both groups from scratch each tick.
+    // Rebuilding from scratch keeps the wiring simple: each row
+    // carries its own closures referencing its own path, with no
+    // need to diff.
+    let update_ui: Rc<dyn Fn()> = {
         let agent = agent.clone();
         let mounts_group = mounts_group.clone();
+        let rules_group = rules_group.clone();
         let overlay = overlay.clone();
         let mounted_children = mounted_children.clone();
+        let rule_children = rule_children.clone();
         let nav_for_rows = nav.clone();
-        move || {
+        let refresh_holder = refresh_holder.clone();
+        Rc::new(move || {
+            // ----- Mounts -----
             for child in mounted_children.borrow_mut().drain(..) {
                 mounts_group.remove(&child);
             }
@@ -320,8 +344,43 @@ fn build_mount_sync_page(
                     mounted_children.borrow_mut().push(err.upcast::<gtk::Widget>());
                 }
             }
-        }
+
+            // ----- Sync Rules -----
+            for child in rule_children.borrow_mut().drain(..) {
+                rules_group.remove(&child);
+            }
+            let rules: Vec<FolderRule> = OdriveDb::open(agent.get_db_path())
+                .and_then(|db| db.list_folder_rules())
+                .unwrap_or_default();
+            if rules.is_empty() {
+                let empty = StatusPage::builder()
+                    .icon_name("emblem-default-symbolic")
+                    .title("No sync rules yet")
+                    .description("Set per-folder auto-download rules from a folder's detail page.")
+                    .build();
+                empty.add_css_class("compact");
+                rules_group.add(&empty);
+                rule_children.borrow_mut().push(empty.upcast::<gtk::Widget>());
+            } else {
+                let refresh_for_rows = refresh_holder
+                    .borrow()
+                    .clone()
+                    .expect("refresh closure bound before first update_ui");
+                for rule in rules {
+                    let row = build_rule_row(
+                        agent.clone(),
+                        overlay.clone(),
+                        nav_for_rows.clone(),
+                        rule,
+                        refresh_for_rows.clone(),
+                    );
+                    rules_group.add(&row);
+                    rule_children.borrow_mut().push(row.upcast::<gtk::Widget>());
+                }
+            }
+        })
     };
+    *refresh_holder.borrow_mut() = Some(update_ui.clone());
 
     update_ui();
 
@@ -350,6 +409,225 @@ fn stub_status_page(title: &str, description: &str, icon_name: &str) -> StatusPa
         .title(title)
         .description(description)
         .build()
+}
+
+/// Build one row in the **Sync Rules** group. Body click → push the
+/// folder's detail page (same one the mount drill-in uses) onto the
+/// shared NavigationView. Trailing ellipsis → popover with Open
+/// folder / Pause | Resume / Delete. Each action re-runs `refresh`
+/// after mutating the DB + agent so the list reflects the new state.
+fn build_rule_row(
+    agent: Rc<OdriveAgent>,
+    overlay: ToastOverlay,
+    nav: NavigationView,
+    rule: FolderRule,
+    refresh: Rc<dyn Fn()>,
+) -> ActionRow {
+    let path = rule.local_path.clone();
+    let row = ActionRow::builder()
+        .title(&path)
+        .subtitle(&format_rule_subtitle(&rule))
+        .activatable(true)
+        .build();
+
+    let icon = adw::gtk::Image::from_icon_name(if rule.is_paused() {
+        "media-playback-pause-symbolic"
+    } else {
+        "folder-symbolic"
+    });
+    icon.set_pixel_size(20);
+    icon.set_margin_start(6);
+    icon.set_margin_end(8);
+    row.add_prefix(&icon);
+
+    // Ellipsis popover: a vertical Box of flat buttons. We use a
+    // hand-rolled popover rather than a GMenu so the per-row state
+    // (paused vs. active) can flip the middle item's label without
+    // re-binding action arguments.
+    let popover = gtk::Popover::new();
+    let menu_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    menu_box.set_margin_top(4);
+    menu_box.set_margin_bottom(4);
+    menu_box.set_margin_start(4);
+    menu_box.set_margin_end(4);
+
+    let open_btn = popover_button("Open folder");
+    let pause_btn = popover_button(if rule.is_paused() { "Resume" } else { "Pause" });
+    let delete_btn = popover_button("Delete");
+    delete_btn.add_css_class("destructive-action");
+    menu_box.append(&open_btn);
+    menu_box.append(&pause_btn);
+    menu_box.append(&delete_btn);
+    popover.set_child(Some(&menu_box));
+
+    let menu_btn = MenuButton::builder()
+        .icon_name("view-more-symbolic")
+        .popover(&popover)
+        .valign(gtk::Align::Center)
+        .build();
+    menu_btn.add_css_class("flat");
+    row.add_suffix(&menu_btn);
+
+    // Body click: same effect as the popover's Open folder.
+    row.connect_activated({
+        let agent = agent.clone();
+        let overlay = overlay.clone();
+        let nav = nav.clone();
+        let path = path.clone();
+        move |_| {
+            push_folder_page(&agent, &overlay, &nav, &path);
+        }
+    });
+
+    open_btn.connect_clicked({
+        let agent = agent.clone();
+        let overlay = overlay.clone();
+        let nav = nav.clone();
+        let path = path.clone();
+        let popover = popover.clone();
+        move |_| {
+            popover.popdown();
+            push_folder_page(&agent, &overlay, &nav, &path);
+        }
+    });
+
+    pause_btn.connect_clicked({
+        let agent = agent.clone();
+        let overlay = overlay.clone();
+        let path = path.clone();
+        let refresh = refresh.clone();
+        let popover = popover.clone();
+        move |_| {
+            popover.popdown();
+            toggle_pause(&agent, &overlay, &path);
+            refresh();
+        }
+    });
+
+    delete_btn.connect_clicked({
+        let agent = agent.clone();
+        let overlay = overlay.clone();
+        let path = path.clone();
+        let refresh = refresh.clone();
+        let popover = popover.clone();
+        move |_| {
+            popover.popdown();
+            delete_rule(&agent, &overlay, &path);
+            refresh();
+        }
+    });
+
+    row
+}
+
+fn popover_button(label: &str) -> Button {
+    let btn = Button::builder()
+        .label(label)
+        .halign(gtk::Align::Fill)
+        .build();
+    btn.add_css_class("flat");
+    btn.set_child(Some(
+        &gtk::Label::builder()
+            .label(label)
+            .halign(gtk::Align::Start)
+            .build(),
+    ));
+    btn
+}
+
+/// Translate a `FolderRule` into the user-facing subtitle. Active
+/// rules render their threshold; paused rules show the would-resume
+/// threshold so the user can tell at a glance what they're suspended.
+fn format_rule_subtitle(rule: &FolderRule) -> String {
+    if let Some(paused_mb) = rule.paused_threshold_mb {
+        format!("Paused — would auto-download {}", format_threshold(paused_mb))
+    } else {
+        format_threshold(rule.threshold_mb)
+    }
+}
+
+fn format_threshold(mb: i32) -> String {
+    match mb {
+        0 => "Don't auto-download".to_string(),
+        -1 => "all files (unlimited)".to_string(),
+        n if n > 0 => format!("up to {} MB", n),
+        _ => format!("({} MB)", mb),
+    }
+}
+
+fn push_folder_page(
+    agent: &Rc<OdriveAgent>,
+    overlay: &ToastOverlay,
+    nav: &NavigationView,
+    path: &str,
+) {
+    if !Path::new(path).exists() {
+        overlay.add_toast(Toast::new(&format!(
+            "Folder no longer exists: {}",
+            path
+        )));
+        return;
+    }
+    let page = mount_detail::build_folder_page(
+        agent.clone(),
+        overlay.clone(),
+        nav.clone(),
+        path.to_string(),
+    );
+    nav.push(&page);
+}
+
+/// Pause an active rule, or resume a paused one. The DB is updated
+/// first (so any subsequent UI tick reads the right state); the
+/// upstream agent push happens second (best-effort — a failure
+/// surfaces as a toast but the local state still flipped). When
+/// resuming, we restore the prior `expand_subfolders` from the DB row
+/// — pausing preserves it so resume hits the same upstream shape.
+fn toggle_pause(agent: &Rc<OdriveAgent>, overlay: &ToastOverlay, path: &str) {
+    let db = match OdriveDb::open(agent.get_db_path()) {
+        Ok(d) => d,
+        Err(e) => {
+            overlay.add_toast(Toast::new(&format!("DB error: {}", e)));
+            return;
+        }
+    };
+    let Some(rule) = db.get_folder_rule(path).ok().flatten() else { return };
+
+    let result = if rule.is_paused() {
+        match db.resume_folder_rule(path) {
+            Ok(Some(prior_mb)) => agent.folder_sync_rule(
+                path,
+                FolderSyncThreshold::from_db_value(prior_mb),
+                rule.expand_subfolders,
+            ),
+            _ => Ok(String::new()),
+        }
+    } else {
+        match db.pause_folder_rule(path) {
+            Ok(Some(_)) => {
+                agent.folder_sync_rule(path, FolderSyncThreshold::None, false)
+            }
+            _ => Ok(String::new()),
+        }
+    };
+    if let Err(e) = result {
+        overlay.add_toast(Toast::new(&format!("Agent push failed: {}", e)));
+    }
+}
+
+/// Delete a rule: zero the upstream rule (no remove command exists)
+/// and drop the local DB row. Errors surface as toasts; the user can
+/// retry from the same row.
+fn delete_rule(agent: &Rc<OdriveAgent>, overlay: &ToastOverlay, path: &str) {
+    if let Err(e) = agent.folder_sync_rule(path, FolderSyncThreshold::None, false) {
+        overlay.add_toast(Toast::new(&format!("Delete failed (agent): {}", e)));
+        return;
+    }
+    if let Ok(db) = OdriveDb::open(agent.get_db_path()) {
+        if let Err(e) = db.delete_folder_rule(path) {
+            overlay.add_toast(Toast::new(&format!("Delete failed (db): {}", e)));
+        }
+    }
 }
 
 /// Build a single mount entry. The row is `activatable` and on click

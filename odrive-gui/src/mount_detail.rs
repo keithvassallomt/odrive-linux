@@ -45,6 +45,20 @@ pub fn build_mount_root(
     build_page(agent, overlay, nav, mount_path, true)
 }
 
+/// Open the detail page for a non-root folder. Used by the Sync Rules
+/// listing on the Mount & Sync tab to jump directly to a rule's
+/// folder. Pushes onto the same NavigationView as the mount drill-in
+/// flow, so the back button takes the user to wherever they were
+/// before clicking the rule.
+pub fn build_folder_page(
+    agent: Rc<OdriveAgent>,
+    overlay: ToastOverlay,
+    nav: NavigationView,
+    folder_path: String,
+) -> NavigationPage {
+    build_page(agent, overlay, nav, folder_path, false)
+}
+
 fn build_page(
     agent: Rc<OdriveAgent>,
     overlay: ToastOverlay,
