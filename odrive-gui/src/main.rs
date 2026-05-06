@@ -1,3 +1,4 @@
+mod backup_page;
 mod indicator;
 mod log_viewer;
 mod mount_detail;
@@ -207,11 +208,7 @@ fn build_dashboard_page(
         .add_titled_with_icon(&mount_sync, Some("mounts"), "Mount & Sync", "folder-symbolic")
         .set_icon_name(Some("folder-symbolic"));
 
-    let backup = stub_status_page(
-        "Backup",
-        "Backup configuration will live here.",
-        "drive-harddisk-symbolic",
-    );
+    let backup = backup_page::build_backup_page(agent.clone(), overlay.clone());
     stack
         .add_titled_with_icon(&backup, Some("backup"), "Backup", "drive-harddisk-symbolic")
         .set_icon_name(Some("drive-harddisk-symbolic"));

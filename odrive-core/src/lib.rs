@@ -6,7 +6,10 @@ pub use db::{FolderRule, OdriveDb};
 use std::process::{Command, Stdio};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use std::io::{Read, Write};
+use std::net::{Shutdown, TcpStream};
 use std::path::Path;
+use std::time::Duration;
 use std::fs;
 
 /// True iff the human-readable `odrive status` text reports both an
@@ -123,6 +126,80 @@ pub struct OdriveMount {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrashItem {
     pub local_path: String,
+}
+
+/// One backup job as the CLI's `BackupsStatus` formatter prints it. The
+/// agent's IPC carries richer per-job fields (`processing`, `size`,
+/// `percentComplete`); the CLI strips them. We can read those via
+/// [`AgentIpc::status`] when we need progress UI, but the bulk of the
+/// Backup tab uses this CLI-shell-out struct so it stays consistent
+/// with the rest of the Manager's data path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupJob {
+    pub job_id: String,
+    pub local_path: String,
+    pub remote_path: String,
+    pub status: String,
+}
+
+/// Pre-formatted schedule strings the agent already emits (e.g.
+/// `"09:42PM"`, `"Next backup in 11 hours and 14 minutes"`). We pass
+/// them through to the UI verbatim — the agent's wording is the same
+/// users see on macOS / Windows.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BackupSchedule {
+    pub last_backup_time: Option<String>,
+    pub time_till_next: Option<String>,
+}
+
+/// Parse `odrive status --backups` output. The agent emits one record
+/// per job formatted as four labelled lines (with surrounding blank
+/// lines):
+/// ```text
+/// ID: <jobId>
+/// Local Path: <localPath>
+/// Remote Path: <remotePath>
+/// Status: <status>
+/// ```
+/// On empty trash the formatter prints `No backup jobs.\n`. We handle
+/// both, plus tolerate stray blank lines and out-of-order field labels
+/// (defensive: the upstream formatter is fixed, but order shifts have
+/// happened in past agent versions).
+pub fn parse_backups_status(stdout: &str) -> Vec<BackupJob> {
+    let mut jobs = Vec::new();
+    let mut cur = std::collections::HashMap::<&str, String>::new();
+    let flush =
+        |cur: &mut std::collections::HashMap<&str, String>, jobs: &mut Vec<BackupJob>| {
+            if let Some(job_id) = cur.remove("ID") {
+                jobs.push(BackupJob {
+                    job_id,
+                    local_path: cur.remove("Local Path").unwrap_or_default(),
+                    remote_path: cur.remove("Remote Path").unwrap_or_default(),
+                    status: cur.remove("Status").unwrap_or_default(),
+                });
+            }
+            cur.clear();
+        };
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() || line == "No backup jobs." {
+            flush(&mut cur, &mut jobs);
+            continue;
+        }
+        for label in &["ID", "Local Path", "Remote Path", "Status"] {
+            let prefix = format!("{}: ", label);
+            if let Some(value) = line.strip_prefix(&prefix) {
+                if *label == "ID" && cur.contains_key("ID") {
+                    // New record starting before a blank line — flush.
+                    flush(&mut cur, &mut jobs);
+                }
+                cur.insert(label, value.to_string());
+                break;
+            }
+        }
+    }
+    flush(&mut cur, &mut jobs);
+    jobs
 }
 
 /// Parse `odrive status --trash` output.
@@ -1046,6 +1123,103 @@ curl -fL "https://dl.odrive.com/odrivecli-lnx-64" | tar -xzf- -C "$od/"
         Ok(parse_mounts(&stdout))
     }
 
+    /// `odrive backup <local> <remote>` — register a new backup job.
+    /// Upstream is one-way local→remote and runs on the agent's
+    /// schedule (24 h default). Returns the agent's stdout (usually
+    /// empty on success).
+    pub fn add_backup_job(&self, local: &str, remote: &str) -> Result<String, OdriveError> {
+        let output = Command::new(&self.bin_path)
+            .arg("backup")
+            .arg(local)
+            .arg(remote)
+            .output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let msg = if !stderr.is_empty() { stderr } else { stdout };
+            return Err(OdriveError::CliError(format!(
+                "odrive backup failed: {}",
+                msg
+            )));
+        }
+        Ok(stdout)
+    }
+
+    /// `odrive removebackup <jobId>` — drop a job. The IPC also
+    /// supports removal by `localPath` (the cleaner verb) but the CLI
+    /// only exposes the jobId form, and we have the jobId from
+    /// `get_backup_jobs()`, so it's a wash.
+    pub fn remove_backup_job(&self, job_id: &str) -> Result<String, OdriveError> {
+        let output = Command::new(&self.bin_path)
+            .arg("removebackup")
+            .arg(job_id)
+            .output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let msg = if !stderr.is_empty() { stderr } else { stdout };
+            return Err(OdriveError::CliError(format!(
+                "odrive removebackup failed: {}",
+                msg
+            )));
+        }
+        Ok(stdout)
+    }
+
+    /// `odrive backupnow` — kick the agent's scheduler immediately.
+    /// Bulk only: there's no per-job force-run command in either the
+    /// CLI or the IPC. All registered jobs run.
+    pub fn backup_now(&self) -> Result<String, OdriveError> {
+        let output = Command::new(&self.bin_path).arg("backupnow").output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let msg = if !stderr.is_empty() { stderr } else { stdout };
+            return Err(OdriveError::CliError(format!(
+                "odrive backupnow failed: {}",
+                msg
+            )));
+        }
+        Ok(stdout)
+    }
+
+    /// `odrive status --backups` → list of registered jobs.
+    pub fn get_backup_jobs(&self) -> Result<Vec<BackupJob>, OdriveError> {
+        let output = Command::new(&self.bin_path)
+            .arg("status")
+            .arg("--backups")
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let msg = if !stderr.is_empty() { stderr } else { stdout };
+            return Err(OdriveError::CliError(format!(
+                "odrive status --backups failed: {}",
+                msg
+            )));
+        }
+        Ok(parse_backups_status(&String::from_utf8_lossy(&output.stdout)))
+    }
+
+    /// IPC-direct read of `lastBackupTime` and `timeTillNextBackup`.
+    /// The CLI's status pretty-printer drops both fields, so the only
+    /// way to surface them is to speak the agent's JSON IPC ourselves.
+    /// Cheap: opens a TCP socket to 127.0.0.1, sends one line of JSON,
+    /// reads one frame, closes. See [`AgentIpc::status`] for the
+    /// generic primitive.
+    pub fn get_backup_schedule(&self) -> Result<BackupSchedule, OdriveError> {
+        let ipc = AgentIpc::new(&self.home);
+        let msg = ipc.status()?;
+        Ok(BackupSchedule {
+            last_backup_time: msg
+                .get("lastBackupTime")
+                .and_then(|v| v.as_str().map(|s| s.to_string())),
+            time_till_next: msg
+                .get("timeTillNextBackup")
+                .and_then(|v| v.as_str().map(|s| s.to_string())),
+        })
+    }
+
     /// `odrive status --trash` → list of trashed items.
     pub fn get_trash_items(&self) -> Result<Vec<TrashItem>, OdriveError> {
         let output = Command::new(&self.bin_path)
@@ -1210,6 +1384,91 @@ pub fn set_folder_custom_icon(local_path: &str, icon_name: &str) -> std::io::Res
 /// Inverse of `set_folder_custom_icon`: strip the custom-icon metadata
 /// from `local_path`. Called from `unmount` so a folder no longer
 /// associated with odrive doesn't keep the distinctive icon.
+/// Minimal client for the agent's local JSON-over-TCP IPC. The agent
+/// listens on 127.0.0.1:<port> where `<port>` lives in
+/// `~/.odrive-agent/.oreg` under `current.protocol`. Each command is a
+/// single line of JSON (`{"command": <name>, "parameters": {...}}\n`)
+/// and the agent replies with one or more lines of
+/// `{"messageType": "Status"|"Error", "message": <value>}`.
+///
+/// Used in this codebase only for fields the public CLI strips —
+/// today, just `lastBackupTime` / `timeTillNextBackup` for the Backup
+/// tab's schedule strip. All mutations still go through the CLI so
+/// upstream's audit log (`User chose to ...` lines in the agent log)
+/// stays accurate.
+pub struct AgentIpc {
+    oreg_path: String,
+}
+
+impl AgentIpc {
+    pub fn new(home: &str) -> Self {
+        Self {
+            oreg_path: format!("{}/.odrive-agent/.oreg", home),
+        }
+    }
+
+    /// Read the protocol port from `.oreg`. Format:
+    /// `{"current": {"protocol": <port>}, ...}`. Returns `None` if the
+    /// file is missing, unreadable, or doesn't contain the expected
+    /// key — same fault-tolerance posture as `OdriveConfig::load`.
+    fn read_port(&self) -> Result<u16, OdriveError> {
+        let bytes = fs::read_to_string(&self.oreg_path).map_err(|e| {
+            OdriveError::CliError(format!("agent registry not readable: {}", e))
+        })?;
+        let v: serde_json::Value = serde_json::from_str(&bytes)
+            .map_err(|e| OdriveError::Parse(format!("agent registry not JSON: {}", e)))?;
+        v.get("current")
+            .and_then(|c| c.get("protocol"))
+            .and_then(|p| p.as_u64())
+            .map(|p| p as u16)
+            .ok_or_else(|| OdriveError::Parse("agent registry missing current.protocol".into()))
+    }
+
+    /// `{"command": "status"}` → first response frame's `message`
+    /// object. Short timeouts (1s connect, 2s read) so the call doesn't
+    /// hang the GTK main loop if the agent's wedged.
+    pub fn status(&self) -> Result<serde_json::Value, OdriveError> {
+        let port = self.read_port()?;
+        let addr = format!("127.0.0.1:{}", port);
+        let stream_addr: std::net::SocketAddr = addr.parse().map_err(|e: std::net::AddrParseError| {
+            OdriveError::Parse(format!("invalid agent address {}: {}", addr, e))
+        })?;
+        let mut sock = TcpStream::connect_timeout(&stream_addr, Duration::from_secs(1))
+            .map_err(|e| OdriveError::CliError(format!("agent IPC connect failed: {}", e)))?;
+        sock.set_read_timeout(Some(Duration::from_secs(2)))?;
+        sock.set_write_timeout(Some(Duration::from_secs(2)))?;
+        let payload = b"{\"command\":\"status\",\"parameters\":{}}\n";
+        sock.write_all(payload)?;
+
+        // Read until we have at least one '\n'. The agent's status
+        // response is a single frame in practice (one big JSON object)
+        // so 64 KB chunks are plenty.
+        let mut buf = Vec::with_capacity(64 * 1024);
+        let mut chunk = [0u8; 64 * 1024];
+        while !buf.contains(&b'\n') {
+            let n = sock.read(&mut chunk)?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        let _ = sock.shutdown(Shutdown::Both);
+
+        let line_end = buf
+            .iter()
+            .position(|b| *b == b'\n')
+            .unwrap_or(buf.len());
+        let line = std::str::from_utf8(&buf[..line_end])
+            .map_err(|e| OdriveError::Parse(format!("agent IPC non-utf8 response: {}", e)))?;
+        let frame: serde_json::Value = serde_json::from_str(line)
+            .map_err(|e| OdriveError::Parse(format!("agent IPC bad JSON: {}", e)))?;
+        Ok(frame
+            .get("message")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
+    }
+}
+
 pub fn unset_folder_custom_icon(local_path: &str) -> std::io::Result<()> {
     let status = Command::new("gio")
         .args(["set", "-t", "unset", local_path, "metadata::custom-icon-name"])
@@ -1631,6 +1890,64 @@ xlThreshold: medium
             "/home/keith/odrive/Google Drive/sub/b.txt"
         );
         assert_eq!(items[2].local_path, "/home/keith/odrive/OneDrive/c.txt");
+    }
+
+    #[test]
+    fn parse_backups_status_empty_sentinel() {
+        let jobs = parse_backups_status("No backup jobs.\n");
+        assert!(jobs.is_empty());
+    }
+
+    #[test]
+    fn parse_backups_status_single_job() {
+        // The CLI emits a leading and trailing blank line plus the
+        // four labelled fields per the BackupsStatus formatter.
+        let s = "\nID: abc-123\nLocal Path: /home/keith/Documents\n\
+                 Remote Path: /Google Drive/Backups/Documents\nStatus: ACTIVE\n\n";
+        let jobs = parse_backups_status(s);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].job_id, "abc-123");
+        assert_eq!(jobs[0].local_path, "/home/keith/Documents");
+        assert_eq!(jobs[0].remote_path, "/Google Drive/Backups/Documents");
+        assert_eq!(jobs[0].status, "ACTIVE");
+    }
+
+    #[test]
+    fn parse_backups_status_multiple_jobs() {
+        let s = "\nID: aaa\nLocal Path: /home/k/A\nRemote Path: /R/A\nStatus: ACTIVE\n\n\
+                 ID: bbb\nLocal Path: /home/k/B\nRemote Path: /R/B\nStatus: PAUSED\n\n";
+        let jobs = parse_backups_status(s);
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].job_id, "aaa");
+        assert_eq!(jobs[0].status, "ACTIVE");
+        assert_eq!(jobs[1].job_id, "bbb");
+        assert_eq!(jobs[1].status, "PAUSED");
+    }
+
+    #[test]
+    fn parse_backups_status_back_to_back_records_without_blank_line() {
+        // Defensive: if the formatter ever drops the blank separator,
+        // a fresh `ID:` while we already hold one should flush the old
+        // record before starting the new one. (Mirrors how parse_mounts
+        // tolerates orphaned remote lines.)
+        let s = "ID: aaa\nLocal Path: /A\nRemote Path: /RA\nStatus: ACTIVE\n\
+                 ID: bbb\nLocal Path: /B\nRemote Path: /RB\nStatus: ACTIVE\n";
+        let jobs = parse_backups_status(s);
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].job_id, "aaa");
+        assert_eq!(jobs[1].job_id, "bbb");
+    }
+
+    #[test]
+    fn parse_backups_status_missing_fields_filled_blank() {
+        // Status line missing → empty string in the struct, NOT an
+        // error. The agent always emits the full set, but a partial
+        // shouldn't panic the parser or skip the record.
+        let s = "ID: solo\nLocal Path: /L\nRemote Path: /R\n\n";
+        let jobs = parse_backups_status(s);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].job_id, "solo");
+        assert_eq!(jobs[0].status, "");
     }
 
     #[test]
