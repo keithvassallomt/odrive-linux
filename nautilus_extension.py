@@ -267,6 +267,16 @@ class OdriveExtension(GObject.GObject, Nautilus.MenuProvider, Nautilus.InfoProvi
         share_item.connect('activate', self.on_share_link_clicked, in_mount_any)
         submenu.append_item(share_item)
 
+        # Share Storage — static link to odrive's Spaces feature page; no
+        # per-item state involved, so the action ignores the selection.
+        storage_item = Nautilus.MenuItem(
+            name='OdriveMenu::ShareStorage',
+            label='Share Storage',
+            tip='Learn about odrive Spaces (sharing storage with others)'
+        )
+        storage_item.connect('activate', self.on_share_storage_clicked)
+        submenu.append_item(storage_item)
+
         # Copy Share Link — same URL, written to the clipboard instead.
         copy_item = Nautilus.MenuItem(
             name='OdriveMenu::CopyShareLink',
@@ -329,6 +339,12 @@ class OdriveExtension(GObject.GObject, Nautilus.MenuProvider, Nautilus.InfoProvi
                              stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL,
                              start_new_session=True)
+
+    def on_share_storage_clicked(self, menu):
+        subprocess.Popen(['xdg-open', 'https://www.odrive.com/features/spaces'],
+                         stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL,
+                         start_new_session=True)
 
     def on_open_web_clicked(self, menu, paths):
         for path in paths:
