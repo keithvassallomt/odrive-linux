@@ -283,14 +283,27 @@ case "$family" in
         # against the configured repos. --install-recommends pulls
         # python3-nautilus / dolphin (declared as Recommends in our
         # control file) which apt would otherwise skip on local installs.
+        # --reinstall in --from-dir mode lets a developer iterate on the
+        # same version without bumping it for every test cycle.
         run "$SUDO apt-get update -qq"
-        run "$SUDO apt-get install -y --install-recommends ${files[*]}"
+        if [ -n "$FROM_DIR" ]; then
+            run "$SUDO apt-get install -y --reinstall --install-recommends ${files[*]}"
+        else
+            run "$SUDO apt-get install -y --install-recommends ${files[*]}"
+        fi
         ;;
     rpm)
         log "installing via dnf"
         # dnf honours Weak Deps (Recommends) by default, so
-        # nautilus-python / dolphin pull in transparently.
-        run "$SUDO dnf install -y ${files[*]}"
+        # nautilus-python / dolphin pull in transparently. dnf install
+        # of a same-version local file no-ops — use `reinstall` in
+        # --from-dir mode to force the swap, falling back to `install`
+        # if the package isn't actually installed yet.
+        if [ -n "$FROM_DIR" ]; then
+            run "$SUDO dnf reinstall -y ${files[*]} || $SUDO dnf install -y ${files[*]}"
+        else
+            run "$SUDO dnf install -y ${files[*]}"
+        fi
         ;;
 esac
 
