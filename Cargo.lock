@@ -940,6 +940,7 @@ dependencies = [
  "ksni",
  "libadwaita",
  "odrive-core",
+ "serde_json",
 ]
 
 [[package]]

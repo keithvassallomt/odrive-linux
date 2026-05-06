@@ -18,16 +18,16 @@ use libadwaita as adw;
 use adw::prelude::*;
 use adw::{
     ActionRow, ApplicationWindow, ComboRow, HeaderBar, NavigationPage, NavigationSplitView,
-    PreferencesGroup, PreferencesPage, StatusPage, Toast, ToastOverlay, ToolbarView,
-    WindowTitle,
+    PreferencesGroup, PreferencesPage, SpinRow, StatusPage, SwitchRow, Toast, ToastOverlay,
+    ToolbarView, WindowTitle,
 };
 use adw::gtk::{
-    self, glib, Application, Button, Label, ListBox, ListBoxRow, SelectionMode, Stack,
-    StackTransitionType, StringList,
+    self, glib, Adjustment, Application, Button, Label, ListBox, ListBoxRow, SelectionMode,
+    Stack, StackTransitionType, StringList,
 };
 use odrive_core::{
-    AutoUnsyncThreshold, OdriveAgent, OdriveConfig, OdriveDb, PlaceholderThreshold, XlThreshold,
-    DEFAULT_TRAY_ICON_COLOR, TRAY_ICON_COLORS,
+    AutoTrashThreshold, AutoUnsyncThreshold, OdriveAgent, OdriveConfig, OdriveDb,
+    PlaceholderThreshold, XlThreshold, DEFAULT_TRAY_ICON_COLOR, TRAY_ICON_COLORS,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -163,12 +163,7 @@ fn build_section_content(
     match name {
         "general" => build_general_page(agent, overlay).upcast(),
         "appearance" => build_appearance_page(overlay, tray).upcast(),
-        "advanced" => StatusPage::builder()
-            .icon_name("preferences-system-symbolic")
-            .title("Advanced")
-            .description("Advanced settings will live here.")
-            .build()
-            .upcast(),
+        "advanced" => build_advanced_page(agent, overlay).upcast(),
         "status" => build_status_page(agent, overlay, window).upcast(),
         _ => StatusPage::new().upcast(),
     }
@@ -191,22 +186,408 @@ fn build_general_page(agent: &Rc<OdriveAgent>, overlay: &ToastOverlay) -> Prefer
     let placeholder_row = build_placeholder_row(initial.placeholder);
     let xl_row = build_xl_row(initial.xl);
     let auto_unsync_row = build_auto_unsync_row(initial.auto_unsync);
+    let auto_trash_row = build_auto_trash_row(initial.auto_trash);
     general.add(&placeholder_row);
     general.add(&xl_row);
     general.add(&auto_unsync_row);
+    general.add(&auto_trash_row);
     page.add(&general);
 
     // Re-entrancy guard: applying a value may cause us to revert the
     // selection on error, which itself fires `notify::selected`. Without
-    // this we'd loop or double-toast. Shared across all three handlers
+    // this we'd loop or double-toast. Shared across all four handlers
     // since only one row is interactive at any given moment.
     let suppress = Rc::new(RefCell::new(false));
 
     wire_placeholder(&placeholder_row, agent.clone(), overlay.clone(), suppress.clone());
     wire_xl(&xl_row, agent.clone(), overlay.clone(), suppress.clone());
     wire_auto_unsync(&auto_unsync_row, agent.clone(), overlay.clone(), suppress.clone());
+    wire_auto_trash(&auto_trash_row, agent.clone(), overlay.clone(), suppress.clone());
 
     page
+}
+
+/// Advanced page exposes the agent's two `odrive_user_*_conf.txt`
+/// files. The agent watches both files for mtime changes (~2 s poll
+/// in `AdvancedSettingsController._configure`) and re-reads them on
+/// the fly, so writes here apply without an agent restart.
+///
+/// Settings are split into groups by intent rather than by source
+/// file (the user doesn't care which file a key lives in). Anything
+/// CLI-exposed is intentionally absent — those land on the General
+/// page instead. The `blackList*` lists from the premium file are
+/// deferred until we have a richer text-list editor; raw
+/// comma-separated entries would be a worse UX than not exposing
+/// them at all.
+fn build_advanced_page(agent: &Rc<OdriveAgent>, overlay: &ToastOverlay) -> PreferencesPage {
+    let page = PreferencesPage::new();
+    page.set_margin_top(12);
+
+    // Read both conf files into shared, mutable state. Each widget
+    // mutates the matching JSON value in-memory and writes the file
+    // back; the agent picks up the change on its next poll. We
+    // preserve unknown keys (round-trip via serde_json::Value) so
+    // settings the user has set via other means aren't dropped.
+    let general = Rc::new(RefCell::new(
+        agent
+            .read_general_conf()
+            .unwrap_or_else(|_| serde_json::json!({})),
+    ));
+    let premium = Rc::new(RefCell::new(
+        agent
+            .read_premium_conf()
+            .unwrap_or_else(|_| serde_json::json!({})),
+    ));
+
+    // Banner: tell users this is the deep end.
+    let intro_group = PreferencesGroup::new();
+    let intro_row = ActionRow::builder()
+        .title("Advanced settings")
+        .subtitle(
+            "These settings live in odrive_user_general_conf.txt and \
+             odrive_user_premium_conf.txt. The agent reloads both files \
+             within a couple of seconds, so changes apply without a \
+             restart. Most users don't need to touch anything here.",
+        )
+        .build();
+    intro_group.add(&intro_row);
+    page.add(&intro_group);
+
+    // ----- Performance -----
+    let perf_group = PreferencesGroup::builder()
+        .title("Performance")
+        .description("Concurrency limits and memory caps.")
+        .build();
+    perf_group.add(&spin_row(
+        "Concurrent downloads",
+        "Files downloading in parallel",
+        1,
+        32,
+        agent.clone(),
+        overlay.clone(),
+        premium.clone(),
+        ConfFile::Premium,
+        "maxConcurrentDownloads",
+        4,
+    ));
+    perf_group.add(&spin_row(
+        "Concurrent uploads",
+        "Files uploading in parallel",
+        1,
+        32,
+        agent.clone(),
+        overlay.clone(),
+        premium.clone(),
+        ConfFile::Premium,
+        "maxConcurrentUploads",
+        4,
+    ));
+    perf_group.add(&spin_row(
+        "Concurrent jobs",
+        "Background sync operations in parallel",
+        1,
+        32,
+        agent.clone(),
+        overlay.clone(),
+        premium.clone(),
+        ConfFile::Premium,
+        "maxConcurrentJobs",
+        4,
+    ));
+    perf_group.add(&spin_row(
+        "Max transfer size (MB)",
+        "Per-file chunk ceiling for uploads/downloads",
+        1,
+        4096,
+        agent.clone(),
+        overlay.clone(),
+        premium.clone(),
+        ConfFile::Premium,
+        "maxTransferMBytes",
+        256,
+    ));
+    perf_group.add(&spin_row(
+        "Memory limit (MB)",
+        "Hard cap on the agent's resident memory; clamped to ≥100 by upstream",
+        100,
+        65536,
+        agent.clone(),
+        overlay.clone(),
+        general.clone(),
+        ConfFile::General,
+        "processMemoryLimitMBytes",
+        3584,
+    ));
+    perf_group.add(&spin_row(
+        "Download retries",
+        "Number of times a failed download is retried before giving up",
+        0,
+        20,
+        agent.clone(),
+        overlay.clone(),
+        general.clone(),
+        ConfFile::General,
+        "maxDownloadRetries",
+        3,
+    ));
+    page.add(&perf_group);
+
+    // ----- Schedule -----
+    let sched_group = PreferencesGroup::builder()
+        .title("Schedule")
+        .description("How often the agent scans local and remote storage, and the backup cadence.")
+        .build();
+    sched_group.add(&spin_row(
+        "Local scan interval (seconds)",
+        "Walk of the local sync tree; clamped to ≥120 by upstream",
+        120,
+        86400,
+        agent.clone(),
+        overlay.clone(),
+        general.clone(),
+        ConfFile::General,
+        "localScanIntervalSecs",
+        1800,
+    ));
+    sched_group.add(&spin_row(
+        "Remote scan interval (minutes)",
+        "Refresh of remote-side state",
+        1,
+        1440,
+        agent.clone(),
+        overlay.clone(),
+        premium.clone(),
+        ConfFile::Premium,
+        "remoteScanIntervalMins",
+        840,
+    ));
+    sched_group.add(&spin_row(
+        "Backup interval (minutes)",
+        "Cadence between scheduled backup-job runs; clamped to ≥5 by upstream",
+        5,
+        10080,
+        agent.clone(),
+        overlay.clone(),
+        premium.clone(),
+        ConfFile::Premium,
+        "backupIntervalMinutes",
+        1440,
+    ));
+    page.add(&sched_group);
+
+    // ----- Notifications -----
+    let notif_group = PreferencesGroup::builder()
+        .title("Notifications")
+        .description("Suppress specific desktop alerts the agent would otherwise post.")
+        .build();
+    notif_group.add(&switch_row(
+        "Suppress trash notifications",
+        "Don't notify when items move to or empty from the odrive trash",
+        agent.clone(),
+        overlay.clone(),
+        general.clone(),
+        ConfFile::General,
+        "suppressTrashNotifications",
+        false,
+    ));
+    notif_group.add(&switch_row(
+        "Suppress urgent notifications",
+        "Don't notify on agent-state changes flagged urgent (login required, agent stopped)",
+        agent.clone(),
+        overlay.clone(),
+        general.clone(),
+        ConfFile::General,
+        "suppressUrgentNotifications",
+        false,
+    ));
+    notif_group.add(&switch_row(
+        "Suppress conflict notifications",
+        "Don't notify when sync conflicts are resolved",
+        agent.clone(),
+        overlay.clone(),
+        general.clone(),
+        ConfFile::General,
+        "suppressConflictNotification",
+        false,
+    ));
+    page.add(&notif_group);
+
+    // ----- Encryption advanced -----
+    let enc_group = PreferencesGroup::builder()
+        .title("Encryption")
+        .description("Advanced toggles for Encryptor folders.")
+        .build();
+    enc_group.add(&switch_row(
+        "Don't encrypt names",
+        "Encrypt file content but leave file/folder names readable. Affects newly-encrypted items only.",
+        agent.clone(),
+        overlay.clone(),
+        premium.clone(),
+        ConfFile::Premium,
+        "disableEncryptedNames",
+        false,
+    ));
+    enc_group.add(&switch_row(
+        "Skip hash verification",
+        "Don't verify the integrity hash of decrypted content. Diagnostic only.",
+        agent.clone(),
+        overlay.clone(),
+        premium.clone(),
+        ConfFile::Premium,
+        "ignoreEncryptionHashCheck",
+        false,
+    ));
+    page.add(&enc_group);
+
+    // ----- Diagnostic flags -----
+    let diag_group = PreferencesGroup::builder()
+        .title("Diagnostic flags")
+        .description(
+            "Escape hatches the agent uses for troubleshooting. Don't change these unless you've been instructed to by odrive support — they can mask real sync errors.",
+        )
+        .build();
+    for (key, title, subtitle) in [
+        ("allowFlagged", "Allow flagged downloads", "Bypass agent's blacklist of file types it normally refuses to download"),
+        ("allowOldDownload", "Allow old downloads", "Re-download files older than what's locally synced"),
+        ("allowZeroByteUpdate", "Allow zero-byte updates", "Let zero-byte remote updates overwrite a local file"),
+        ("ignoreSizeMismatch", "Ignore size mismatch", "Skip the size check during sync; treats mismatches as success"),
+        ("disableConflictDetectionStrict", "Disable strict conflict detection", "Skip mtime-based conflict checks"),
+        ("disableConflictDetectionAll", "Disable all conflict detection", "Skip both mtime and content conflict checks"),
+        ("disableFSEvents", "Disable filesystem events", "Stop listening for FS-event notifications and rely on periodic scans only"),
+        ("disableLocalFileUpdates", "Disable local→remote updates", "Stop pushing local edits up to remote"),
+        ("disableRemoteFileUpdates", "Disable remote→local updates", "Stop pulling remote edits down to local"),
+        ("disableSparse", "Disable sparse files", "Materialise placeholders as full-size files immediately"),
+        ("disableAutoupdateRestart", "Disable auto-update restart", "Don't auto-restart the agent after an in-place update"),
+    ] {
+        diag_group.add(&switch_row(
+            title,
+            subtitle,
+            agent.clone(),
+            overlay.clone(),
+            general.clone(),
+            ConfFile::General,
+            key,
+            false,
+        ));
+    }
+    for (key, title, subtitle) in [
+        ("backupDisableMerge", "Disable backup merge", "Each backup pass creates a fresh upload, even if the file is identical to the prior version"),
+        ("autoUnsyncUseAccess", "Auto-unsync uses access time", "Auto-unsync ages files by atime instead of mtime"),
+        ("allowSyncToOdriveFolderNameMismatch", "Allow odrive-folder name mismatch", "Skip the safety check that the local folder's name matches its odrive identity"),
+        ("disableLocalItemDeletes", "Disable local-item deletes", "Stop the agent from removing local files when their remote counterparts are deleted"),
+        ("disableRemoteItemDeletes", "Disable remote-item deletes", "Stop the agent from removing remote files when their local counterparts are deleted"),
+    ] {
+        diag_group.add(&switch_row(
+            title,
+            subtitle,
+            agent.clone(),
+            overlay.clone(),
+            premium.clone(),
+            ConfFile::Premium,
+            key,
+            false,
+        ));
+    }
+    page.add(&diag_group);
+
+    page
+}
+
+/// Which on-disk conf file a setting belongs to. The Advanced page
+/// edits both files; widgets carry this enum so the writer hits the
+/// right one.
+#[derive(Copy, Clone)]
+enum ConfFile {
+    General,
+    Premium,
+}
+
+/// Persist a (just-mutated) JSON value to its backing file. Errors
+/// surface as toasts; we don't try to roll back the in-memory state
+/// because the next reload will reconcile against whatever the file
+/// actually contains.
+fn write_conf(
+    agent: &OdriveAgent,
+    file: ConfFile,
+    value: &serde_json::Value,
+    overlay: &ToastOverlay,
+) {
+    let result = match file {
+        ConfFile::General => agent.write_general_conf(value),
+        ConfFile::Premium => agent.write_premium_conf(value),
+    };
+    if let Err(e) = result {
+        overlay.add_toast(Toast::new(&format!("Couldn't save setting: {}", e)));
+    }
+}
+
+/// Build a `SwitchRow` bound to a JSON-Value boolean key. Initial
+/// state comes from the value (or `default` if the key is absent).
+/// `connect_active_notify` mutates the in-memory value and writes
+/// the conf file.
+#[allow(clippy::too_many_arguments)]
+fn switch_row(
+    title: &str,
+    subtitle: &str,
+    agent: Rc<OdriveAgent>,
+    overlay: ToastOverlay,
+    conf: Rc<RefCell<serde_json::Value>>,
+    file: ConfFile,
+    key: &'static str,
+    default: bool,
+) -> SwitchRow {
+    let initial = conf
+        .borrow()
+        .get(key)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(default);
+    let row = SwitchRow::builder()
+        .title(title)
+        .subtitle(subtitle)
+        .active(initial)
+        .build();
+    row.connect_active_notify(move |r| {
+        let new = r.is_active();
+        conf.borrow_mut()[key] = serde_json::Value::Bool(new);
+        write_conf(&agent, file, &conf.borrow(), &overlay);
+    });
+    row
+}
+
+/// Build a `SpinRow` bound to a JSON-Value integer key. Range is
+/// `min..=max`; initial value uses the JSON value if present and
+/// in range, otherwise `default`.
+#[allow(clippy::too_many_arguments)]
+fn spin_row(
+    title: &str,
+    subtitle: &str,
+    min: i64,
+    max: i64,
+    agent: Rc<OdriveAgent>,
+    overlay: ToastOverlay,
+    conf: Rc<RefCell<serde_json::Value>>,
+    file: ConfFile,
+    key: &'static str,
+    default: i64,
+) -> SpinRow {
+    let initial = conf
+        .borrow()
+        .get(key)
+        .and_then(|v| v.as_i64())
+        .unwrap_or(default);
+    let initial = initial.clamp(min, max);
+    let adj = Adjustment::new(initial as f64, min as f64, max as f64, 1.0, 10.0, 0.0);
+    let row = SpinRow::builder()
+        .title(title)
+        .subtitle(subtitle)
+        .adjustment(&adj)
+        .build();
+    row.connect_value_notify(move |r| {
+        let new = r.value() as i64;
+        conf.borrow_mut()[key] = serde_json::Value::from(new);
+        write_conf(&agent, file, &conf.borrow(), &overlay);
+    });
+    row
 }
 
 fn build_appearance_page(overlay: &ToastOverlay, tray: &Rc<TrayController>) -> PreferencesPage {
@@ -521,6 +902,21 @@ const AUTO_UNSYNC_VARIANTS: &[AutoUnsyncThreshold] = &[
     AutoUnsyncThreshold::Month,
 ];
 
+const AUTO_TRASH_LABELS: &[&str] = &[
+    "Never",
+    "Immediately",
+    "Every 15 minutes",
+    "Hourly",
+    "Daily",
+];
+const AUTO_TRASH_VARIANTS: &[AutoTrashThreshold] = &[
+    AutoTrashThreshold::Never,
+    AutoTrashThreshold::Immediately,
+    AutoTrashThreshold::Fifteen,
+    AutoTrashThreshold::Hour,
+    AutoTrashThreshold::Day,
+];
+
 fn build_placeholder_row(initial: PlaceholderThreshold) -> ComboRow {
     let row = ComboRow::builder()
         .title("Sync threshold")
@@ -572,6 +968,16 @@ fn build_auto_unsync_row(initial: AutoUnsyncThreshold) -> ComboRow {
         .model(&StringList::new(AUTO_UNSYNC_LABELS))
         .build();
     row.set_selected(index_of(AUTO_UNSYNC_VARIANTS, initial) as u32);
+    row
+}
+
+fn build_auto_trash_row(initial: AutoTrashThreshold) -> ComboRow {
+    let row = ComboRow::builder()
+        .title("Empty trash")
+        .subtitle("Cadence for automatically clearing the odrive trash")
+        .model(&StringList::new(AUTO_TRASH_LABELS))
+        .build();
+    row.set_selected(index_of(AUTO_TRASH_VARIANTS, initial) as u32);
     row
 }
 
@@ -654,6 +1060,31 @@ fn wire_auto_unsync(
     });
 }
 
+fn wire_auto_trash(
+    row: &ComboRow,
+    agent: Rc<OdriveAgent>,
+    overlay: ToastOverlay,
+    suppress: Rc<RefCell<bool>>,
+) {
+    let row_clone = row.clone();
+    row.connect_selected_notify(move |r| {
+        if *suppress.borrow() {
+            return;
+        }
+        let idx = r.selected() as usize;
+        let Some(value) = AUTO_TRASH_VARIANTS.get(idx).copied() else {
+            return;
+        };
+        match agent.auto_trash_threshold(value) {
+            Ok(_) => overlay.add_toast(Toast::new("Empty-trash cadence updated")),
+            Err(e) => {
+                overlay.add_toast(Toast::new(&format!("Update failed: {}", e)));
+                revert_to_agent_state(&row_clone, &agent, &suppress, GlobalSelector::AutoTrash);
+            }
+        }
+    });
+}
+
 /// Persist the tray-colour selection and push it to the running
 /// indicator. No agent setter is involved — this is a pure local
 /// preference. On config-save failure we surface a toast and leave the
@@ -683,6 +1114,7 @@ enum GlobalSelector {
     Placeholder,
     Xl,
     AutoUnsync,
+    AutoTrash,
 }
 
 /// Re-read the agent's reported value and force the combobox back to it
@@ -706,6 +1138,9 @@ fn revert_to_agent_state(
         }
         GlobalSelector::AutoUnsync => {
             row.set_selected(index_of(AUTO_UNSYNC_VARIANTS, g.auto_unsync) as u32);
+        }
+        GlobalSelector::AutoTrash => {
+            row.set_selected(index_of(AUTO_TRASH_VARIANTS, g.auto_trash) as u32);
         }
     }
     *suppress.borrow_mut() = false;

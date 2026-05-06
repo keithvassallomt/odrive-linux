@@ -383,6 +383,41 @@ impl AutoUnsyncThreshold {
     }
 }
 
+/// `odrive autotrashthreshold` accepts and reports identical tokens.
+/// Cadence for automatically emptying the agent's trash; `Never` keeps
+/// items in trash indefinitely until the user explicitly empties it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AutoTrashThreshold {
+    Never,
+    Immediately,
+    Fifteen,
+    Hour,
+    Day,
+}
+
+impl AutoTrashThreshold {
+    pub fn as_cli_arg(self) -> &'static str {
+        match self {
+            AutoTrashThreshold::Never => "never",
+            AutoTrashThreshold::Immediately => "immediately",
+            AutoTrashThreshold::Fifteen => "fifteen",
+            AutoTrashThreshold::Hour => "hour",
+            AutoTrashThreshold::Day => "day",
+        }
+    }
+
+    fn from_status_token(token: &str) -> Option<Self> {
+        match token {
+            "never" => Some(AutoTrashThreshold::Never),
+            "immediately" => Some(AutoTrashThreshold::Immediately),
+            "fifteen" => Some(AutoTrashThreshold::Fifteen),
+            "hour" => Some(AutoTrashThreshold::Hour),
+            "day" => Some(AutoTrashThreshold::Day),
+            _ => None,
+        }
+    }
+}
+
 /// Per-folder sync threshold. `odrive foldersyncrule <path> <threshold>`
 /// accepts the literal `0` to disable auto-download, the literal `inf`
 /// to download everything regardless of size, or any positive integer
@@ -436,6 +471,7 @@ pub struct GlobalSettings {
     pub placeholder: PlaceholderThreshold,
     pub xl: XlThreshold,
     pub auto_unsync: AutoUnsyncThreshold,
+    pub auto_trash: AutoTrashThreshold,
     pub sync_enabled: bool,
 }
 
@@ -448,6 +484,7 @@ impl Default for GlobalSettings {
             placeholder: PlaceholderThreshold::Always,
             xl: XlThreshold::Never,
             auto_unsync: AutoUnsyncThreshold::Never,
+            auto_trash: AutoTrashThreshold::Never,
             sync_enabled: true,
         }
     }
@@ -552,6 +589,13 @@ pub fn parse_global_settings(status_text: &str) -> GlobalSettings {
                     if let Some(v) = tokens.next() {
                         if let Some(a) = AutoUnsyncThreshold::from_status_token(v) {
                             out.auto_unsync = a;
+                        }
+                    }
+                }
+                "autoTrashThreshold:" => {
+                    if let Some(v) = tokens.next() {
+                        if let Some(a) = AutoTrashThreshold::from_status_token(v) {
+                            out.auto_trash = a;
                         }
                     }
                 }
@@ -1064,6 +1108,24 @@ curl -fL "https://dl.odrive.com/odrivecli-lnx-64" | tar -xzf- -C "$od/"
         }
     }
 
+    /// `odrive autotrashthreshold <never|immediately|fifteen|hour|day>`.
+    /// Sets the cadence for automatic trash emptying. Persisted by the
+    /// agent in `odrive_user_premium_conf.txt` as
+    /// `autoEmptyTrashIntervalMins` (with a token-to-minutes mapping
+    /// the agent owns internally).
+    pub fn auto_trash_threshold(&self, value: AutoTrashThreshold) -> Result<String, OdriveError> {
+        let output = Command::new(&self.bin_path)
+            .arg("autotrashthreshold")
+            .arg(value.as_cli_arg())
+            .output()?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            Err(OdriveError::CliError(String::from_utf8_lossy(&output.stderr).to_string()))
+        }
+    }
+
     /// Wrapper for `odrive shutdown`. Terminates the agent cleanly.
     /// Used by the panel indicator's "Quit" item.
     pub fn shutdown(&self) -> Result<String, OdriveError> {
@@ -1238,6 +1300,38 @@ curl -fL "https://dl.odrive.com/odrivecli-lnx-64" | tar -xzf- -C "$od/"
             )));
         }
         Ok(stdout)
+    }
+
+    /// Read `~/.odrive-agent/odrive_user_general_conf.txt` as a
+    /// `serde_json::Value`, preserving every key. The agent watches
+    /// this file for mtime changes and reloads its in-memory state on
+    /// the next poll (~2s), so writing it back is the way to push
+    /// settings without the user needing to restart the agent.
+    pub fn read_general_conf(&self) -> Result<serde_json::Value, OdriveError> {
+        read_conf_file(&self.general_conf_path())
+    }
+
+    /// Inverse of `read_general_conf`. Pretty-prints with 4-space
+    /// indent, matching the upstream's own writeback format closely
+    /// enough that our edits don't churn the diff.
+    pub fn write_general_conf(&self, v: &serde_json::Value) -> Result<(), OdriveError> {
+        write_conf_file(&self.general_conf_path(), v)
+    }
+
+    pub fn read_premium_conf(&self) -> Result<serde_json::Value, OdriveError> {
+        read_conf_file(&self.premium_conf_path())
+    }
+
+    pub fn write_premium_conf(&self, v: &serde_json::Value) -> Result<(), OdriveError> {
+        write_conf_file(&self.premium_conf_path(), v)
+    }
+
+    fn general_conf_path(&self) -> String {
+        format!("{}/.odrive-agent/odrive_user_general_conf.txt", self.home)
+    }
+
+    fn premium_conf_path(&self) -> String {
+        format!("{}/.odrive-agent/odrive_user_premium_conf.txt", self.home)
     }
 
     /// IPC-direct read of `lastBackupTime` and `timeTillNextBackup`.
@@ -1506,6 +1600,40 @@ impl AgentIpc {
             .cloned()
             .unwrap_or(serde_json::Value::Null))
     }
+}
+
+/// Read a JSON conf file (the agent's `odrive_user_*_conf.txt`) into a
+/// generic `serde_json::Value` so callers can edit any key without
+/// having to model the entire schema. Missing file → empty
+/// `Value::Object` (the agent does the same for first-run); malformed
+/// JSON → `OdriveError::Parse` so callers can surface a "your conf
+/// file is broken" error rather than silently dropping settings.
+pub fn read_conf_file(path: &str) -> Result<serde_json::Value, OdriveError> {
+    let bytes = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(serde_json::Value::Object(serde_json::Map::new()));
+        }
+        Err(e) => return Err(OdriveError::Io(e)),
+    };
+    if bytes.trim().is_empty() {
+        return Ok(serde_json::Value::Object(serde_json::Map::new()));
+    }
+    serde_json::from_str(&bytes)
+        .map_err(|e| OdriveError::Parse(format!("conf file {} is not JSON: {}", path, e)))
+}
+
+/// Write a JSON value to a conf file. We pretty-print with 4-space
+/// indent and append a trailing newline — close enough to the
+/// upstream's own writeback (which uses Python's `json.dumps` with
+/// `indent=4` and a trailing space after each colon) that the file
+/// stays human-readable.
+pub fn write_conf_file(path: &str, v: &serde_json::Value) -> Result<(), OdriveError> {
+    let mut s = serde_json::to_string_pretty(v)
+        .map_err(|e| OdriveError::Parse(format!("can't serialize conf: {}", e)))?;
+    s.push('\n');
+    fs::write(path, s)?;
+    Ok(())
 }
 
 pub fn unset_folder_custom_icon(local_path: &str) -> std::io::Result<()> {
@@ -1929,6 +2057,64 @@ xlThreshold: medium
             "/home/keith/odrive/Google Drive/sub/b.txt"
         );
         assert_eq!(items[2].local_path, "/home/keith/odrive/OneDrive/c.txt");
+    }
+
+    #[test]
+    fn conf_file_round_trip_preserves_unknown_keys() {
+        // Real shape from `odrive_user_general_conf.txt`. Round-tripping
+        // through read/write must keep every key, even ones we don't
+        // surface in the GUI — losing them would silently revert agent
+        // config the user set elsewhere.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("conf.txt");
+        let path_s = path.to_string_lossy().into_owned();
+        let original = serde_json::json!({
+            "allowFlagged": false,
+            "localScanIntervalSecs": 1800,
+            "processMemoryLimitMBytes": 3584,
+            "someFutureKeyWeDontKnowYet": "bar",
+            "nestedObject": {"a": 1, "b": [2, 3]},
+        });
+        write_conf_file(&path_s, &original).unwrap();
+        let reread = read_conf_file(&path_s).unwrap();
+        assert_eq!(reread, original);
+    }
+
+    #[test]
+    fn conf_file_missing_returns_empty_object() {
+        // First-run: the agent hasn't written its defaults yet. We
+        // shouldn't error — the caller can layer their own defaults
+        // and write back, matching the agent's own behaviour.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("not-here.txt");
+        let v = read_conf_file(&path.to_string_lossy()).unwrap();
+        assert!(v.is_object() && v.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn conf_file_malformed_returns_parse_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("bad.txt");
+        fs::write(&path, "{this is not, json").unwrap();
+        let err = read_conf_file(&path.to_string_lossy()).unwrap_err();
+        assert!(matches!(err, OdriveError::Parse(_)));
+    }
+
+    #[test]
+    fn parse_global_settings_includes_auto_trash() {
+        let s = "\
+placeholderThreshold: medium
+xlThreshold: large
+autoUnsyncThreshold: week
+autoTrashThreshold: hour
+syncEnabled: True
+";
+        let g = parse_global_settings(s);
+        assert_eq!(g.placeholder, PlaceholderThreshold::Medium);
+        assert_eq!(g.xl, XlThreshold::Large);
+        assert_eq!(g.auto_unsync, AutoUnsyncThreshold::Week);
+        assert_eq!(g.auto_trash, AutoTrashThreshold::Hour);
+        assert!(g.sync_enabled);
     }
 
     #[test]
