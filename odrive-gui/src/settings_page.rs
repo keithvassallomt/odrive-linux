@@ -260,75 +260,52 @@ fn build_advanced_page(agent: &Rc<OdriveAgent>, overlay: &ToastOverlay) -> Prefe
         .build();
     perf_group.add(&spin_row(
         "Concurrent downloads",
-        "Files downloading in parallel",
-        1,
-        32,
-        agent.clone(),
-        overlay.clone(),
-        premium.clone(),
-        ConfFile::Premium,
-        "maxConcurrentDownloads",
-        4,
+        "Maximum number of concurrent downloads in a job.",
+        1, 32,
+        agent.clone(), overlay.clone(), premium.clone(), ConfFile::Premium,
+        "maxConcurrentDownloads", 4,
     ));
     perf_group.add(&spin_row(
         "Concurrent uploads",
-        "Files uploading in parallel",
-        1,
-        32,
-        agent.clone(),
-        overlay.clone(),
-        premium.clone(),
-        ConfFile::Premium,
-        "maxConcurrentUploads",
-        4,
+        "Maximum number of concurrent uploads in a job.",
+        1, 32,
+        agent.clone(), overlay.clone(), premium.clone(), ConfFile::Premium,
+        "maxConcurrentUploads", 4,
     ));
     perf_group.add(&spin_row(
         "Concurrent jobs",
-        "Background sync operations in parallel",
-        1,
-        32,
-        agent.clone(),
-        overlay.clone(),
-        premium.clone(),
-        ConfFile::Premium,
-        "maxConcurrentJobs",
-        4,
+        "Maximum number of jobs that can run concurrently.",
+        1, 32,
+        agent.clone(), overlay.clone(), premium.clone(), ConfFile::Premium,
+        "maxConcurrentJobs", 4,
+    ));
+    perf_group.add(&spin_row(
+        "Initial upload batch size",
+        "Initial number of files odrive uploads concurrently before performance auto-scaling kicks in.",
+        1, 32,
+        agent.clone(), overlay.clone(), premium.clone(), ConfFile::Premium,
+        "initialUploadBatchSize", 1,
     ));
     perf_group.add(&spin_row(
         "Max transfer size (MB)",
-        "Per-file chunk ceiling for uploads/downloads",
-        1,
-        4096,
-        agent.clone(),
-        overlay.clone(),
-        premium.clone(),
-        ConfFile::Premium,
-        "maxTransferMBytes",
-        256,
+        "Maximum size in MB for concurrent transfers; uploads and downloads counted separately.",
+        1, 4096,
+        agent.clone(), overlay.clone(), premium.clone(), ConfFile::Premium,
+        "maxTransferMBytes", 256,
     ));
     perf_group.add(&spin_row(
         "Memory limit (MB)",
-        "Hard cap on the agent's resident memory; clamped to ≥100 by upstream",
-        100,
-        65536,
-        agent.clone(),
-        overlay.clone(),
-        general.clone(),
-        ConfFile::General,
-        "processMemoryLimitMBytes",
-        3584,
+        "Release-valve threshold; the agent triggers memory optimisation when it crosses this. Clamped to ≥100 by upstream.",
+        100, 65536,
+        agent.clone(), overlay.clone(), general.clone(), ConfFile::General,
+        "processMemoryLimitMBytes", 3584,
     ));
     perf_group.add(&spin_row(
         "Download retries",
-        "Number of times a failed download is retried before giving up",
-        0,
-        20,
-        agent.clone(),
-        overlay.clone(),
-        general.clone(),
-        ConfFile::General,
-        "maxDownloadRetries",
-        3,
+        "Number of times a failed download is retried before giving up.",
+        0, 20,
+        agent.clone(), overlay.clone(), general.clone(), ConfFile::General,
+        "maxDownloadRetries", 3,
     ));
     page.add(&perf_group);
 
@@ -339,39 +316,24 @@ fn build_advanced_page(agent: &Rc<OdriveAgent>, overlay: &ToastOverlay) -> Prefe
         .build();
     sched_group.add(&spin_row(
         "Local scan interval (seconds)",
-        "Walk of the local sync tree; clamped to ≥120 by upstream",
-        120,
-        86400,
-        agent.clone(),
-        overlay.clone(),
-        general.clone(),
-        ConfFile::General,
-        "localScanIntervalSecs",
-        1800,
+        "Cadence of the periodic walk of the local sync tree. Clamped to ≥120 by upstream.",
+        120, 86400,
+        agent.clone(), overlay.clone(), general.clone(), ConfFile::General,
+        "localScanIntervalSecs", 1800,
     ));
     sched_group.add(&spin_row(
         "Remote scan interval (minutes)",
-        "Refresh of remote-side state",
-        1,
-        1440,
-        agent.clone(),
-        overlay.clone(),
-        premium.clone(),
-        ConfFile::Premium,
-        "remoteScanIntervalMins",
-        840,
+        "Cadence of the walk over the entire remote file listing. Cannot be below 5 minutes.",
+        5, 1440,
+        agent.clone(), overlay.clone(), premium.clone(), ConfFile::Premium,
+        "remoteScanIntervalMins", 840,
     ));
     sched_group.add(&spin_row(
         "Backup interval (minutes)",
-        "Cadence between scheduled backup-job runs; clamped to ≥5 by upstream",
-        5,
-        10080,
-        agent.clone(),
-        overlay.clone(),
-        premium.clone(),
-        ConfFile::Premium,
-        "backupIntervalMinutes",
-        1440,
+        "Time between when a backup-job run finishes and the next run is kicked off. Clamped to ≥5 by upstream.",
+        5, 10080,
+        agent.clone(), overlay.clone(), premium.clone(), ConfFile::Premium,
+        "backupIntervalMinutes", 1440,
     ));
     page.add(&sched_group);
 
@@ -382,60 +344,68 @@ fn build_advanced_page(agent: &Rc<OdriveAgent>, overlay: &ToastOverlay) -> Prefe
         .build();
     notif_group.add(&switch_row(
         "Suppress trash notifications",
-        "Don't notify when items move to or empty from the odrive trash",
-        agent.clone(),
-        overlay.clone(),
-        general.clone(),
-        ConfFile::General,
-        "suppressTrashNotifications",
-        false,
+        "Don't notify when items move to or empty from the odrive trash.",
+        agent.clone(), overlay.clone(), general.clone(), ConfFile::General,
+        "suppressTrashNotifications", false,
     ));
     notif_group.add(&switch_row(
         "Suppress urgent notifications",
-        "Don't notify on agent-state changes flagged urgent (login required, agent stopped)",
-        agent.clone(),
-        overlay.clone(),
-        general.clone(),
-        ConfFile::General,
-        "suppressUrgentNotifications",
-        false,
+        "Replace hard pop-up windows for urgent alerts with the OS's soft notifications.",
+        agent.clone(), overlay.clone(), general.clone(), ConfFile::General,
+        "suppressUrgentNotifications", false,
     ));
     notif_group.add(&switch_row(
         "Suppress conflict notifications",
-        "Don't notify when sync conflicts are resolved",
-        agent.clone(),
-        overlay.clone(),
-        general.clone(),
-        ConfFile::General,
-        "suppressConflictNotification",
-        false,
+        "Don't notify when sync conflicts are detected.",
+        agent.clone(), overlay.clone(), general.clone(), ConfFile::General,
+        "suppressConflictNotification", false,
     ));
     page.add(&notif_group);
 
-    // ----- Encryption advanced -----
+    // ----- Deletion -----
+    let del_group = PreferencesGroup::builder()
+        .title("Deletion")
+        .description("How deletes propagate between local and remote, and how the OS trash is used.")
+        .build();
+    del_group.add(&os_trash_override_row(
+        agent.clone(), overlay.clone(), general.clone(),
+    ));
+    del_group.add(&switch_row(
+        "Don't apply remote deletes locally",
+        "Prevent odrive from removing local files when their remote counterparts are deleted.",
+        agent.clone(), overlay.clone(), premium.clone(), ConfFile::Premium,
+        "disableLocalItemDeletes", false,
+    ));
+    del_group.add(&switch_row(
+        "Don't apply local deletes remotely",
+        "Prevent odrive from removing remote files when their local counterparts are deleted.",
+        agent.clone(), overlay.clone(), premium.clone(), ConfFile::Premium,
+        "disableRemoteItemDeletes", false,
+    ));
+    page.add(&del_group);
+
+    // ----- Encryption -----
     let enc_group = PreferencesGroup::builder()
         .title("Encryption")
         .description("Advanced toggles for Encryptor folders.")
         .build();
     enc_group.add(&switch_row(
-        "Don't encrypt names",
-        "Encrypt file content but leave file/folder names readable. Affects newly-encrypted items only.",
-        agent.clone(),
-        overlay.clone(),
-        premium.clone(),
-        ConfFile::Premium,
-        "disableEncryptedNames",
-        false,
+        "Don't scramble names",
+        "Encrypt file content only; names render with a `.oenc` extension instead of being scrambled. Newly-encrypted items only.",
+        agent.clone(), overlay.clone(), premium.clone(), ConfFile::Premium,
+        "disableEncryptedNames", false,
+    ));
+    enc_group.add(&switch_row(
+        "Don't save the passphrase",
+        "Disable persisting Encryptor passphrases; the agent will require re-entry on each startup for any encrypted content.",
+        agent.clone(), overlay.clone(), premium.clone(), ConfFile::Premium,
+        "forgetEncPassphrase", false,
     ));
     enc_group.add(&switch_row(
         "Skip hash verification",
-        "Don't verify the integrity hash of decrypted content. Diagnostic only.",
-        agent.clone(),
-        overlay.clone(),
-        premium.clone(),
-        ConfFile::Premium,
-        "ignoreEncryptionHashCheck",
-        false,
+        "Allow downloads when an Encryptor file's hash check fails. Diagnostic only.",
+        agent.clone(), overlay.clone(), premium.clone(), ConfFile::Premium,
+        "ignoreEncryptionHashCheck", false,
     ));
     page.add(&enc_group);
 
@@ -447,48 +417,104 @@ fn build_advanced_page(agent: &Rc<OdriveAgent>, overlay: &ToastOverlay) -> Prefe
         )
         .build();
     for (key, title, subtitle) in [
-        ("allowFlagged", "Allow flagged downloads", "Bypass agent's blacklist of file types it normally refuses to download"),
-        ("allowOldDownload", "Allow old downloads", "Re-download files older than what's locally synced"),
-        ("allowZeroByteUpdate", "Allow zero-byte updates", "Let zero-byte remote updates overwrite a local file"),
-        ("ignoreSizeMismatch", "Ignore size mismatch", "Skip the size check during sync; treats mismatches as success"),
-        ("disableConflictDetectionStrict", "Disable strict conflict detection", "Skip mtime-based conflict checks"),
-        ("disableConflictDetectionAll", "Disable all conflict detection", "Skip both mtime and content conflict checks"),
-        ("disableFSEvents", "Disable filesystem events", "Stop listening for FS-event notifications and rely on periodic scans only"),
-        ("disableLocalFileUpdates", "Disable local→remote updates", "Stop pushing local edits up to remote"),
-        ("disableRemoteFileUpdates", "Disable remote→local updates", "Stop pulling remote edits down to local"),
-        ("disableSparse", "Disable sparse files", "Materialise placeholders as full-size files immediately"),
-        ("disableAutoupdateRestart", "Disable auto-update restart", "Don't auto-restart the agent after an in-place update"),
+        ("allowFlagged", "Allow flagged downloads",
+            "Permit downloads of files the storage provider has flagged as unsafe (Google Drive only)."),
+        ("allowOldDownload", "Allow old downloads",
+            "Permit older remote versions to overwrite a newer local file."),
+        ("allowZeroByteUpdate", "Allow zero-byte updates",
+            "Permit a remote update to truncate a local file to 0 bytes."),
+        ("ignoreSizeMismatch", "Ignore size mismatch",
+            "Treat downloads whose size doesn't match the remote-reported size as a success."),
+        ("disableConflictDetectionStrict", "Disable strict conflict detection",
+            "Treat date-or-size matches as not-a-conflict instead of strict equality."),
+        ("disableConflictDetectionAll", "Disable all conflict detection",
+            "Skip conflict detection entirely; uploads always proceed to remote storage."),
+        ("disableFSEvents", "Disable filesystem events",
+            "Stop listening for OS filesystem events; rely on the periodic local scan only."),
+        ("disableLocalFileUpdates", "Don't update local files",
+            "Stop applying remote content changes to local files."),
+        ("disableRemoteFileUpdates", "Don't update remote files",
+            "Stop applying local content changes to remote files."),
+        ("disableSparse", "Disable sparse placeholders",
+            "Render placeholders as 0-byte files instead of reflecting the remote file's size."),
+        ("disableAutoupdateRestart", "Disable auto-update restart",
+            "Don't auto-restart the agent after an in-place update; the update applies on the next manual start."),
     ] {
         diag_group.add(&switch_row(
-            title,
-            subtitle,
-            agent.clone(),
-            overlay.clone(),
-            general.clone(),
-            ConfFile::General,
-            key,
-            false,
+            title, subtitle,
+            agent.clone(), overlay.clone(), general.clone(), ConfFile::General,
+            key, false,
         ));
     }
     for (key, title, subtitle) in [
-        ("backupDisableMerge", "Disable backup merge", "Each backup pass creates a fresh upload, even if the file is identical to the prior version"),
-        ("autoUnsyncUseAccess", "Auto-unsync uses access time", "Auto-unsync ages files by atime instead of mtime"),
-        ("allowSyncToOdriveFolderNameMismatch", "Allow odrive-folder name mismatch", "Skip the safety check that the local folder's name matches its odrive identity"),
-        ("disableLocalItemDeletes", "Disable local-item deletes", "Stop the agent from removing local files when their remote counterparts are deleted"),
-        ("disableRemoteItemDeletes", "Disable remote-item deletes", "Stop the agent from removing remote files when their local counterparts are deleted"),
+        ("backupDisableMerge", "Don't allow non-empty backup destinations",
+            "Reject setting a backup destination folder that already contains files."),
+        ("autoUnsyncUseAccess", "Auto-unsync by access time",
+            "Use last-accessed time instead of sync activity to decide which files auto-unsync."),
+        ("allowSyncToOdriveFolderNameMismatch", "Allow odrive-folder name mismatch",
+            "Permit pairing a local folder with a remote whose name doesn't match (Sync to odrive)."),
     ] {
         diag_group.add(&switch_row(
-            title,
-            subtitle,
-            agent.clone(),
-            overlay.clone(),
-            premium.clone(),
-            ConfFile::Premium,
-            key,
-            false,
+            title, subtitle,
+            agent.clone(), overlay.clone(), premium.clone(), ConfFile::Premium,
+            key, false,
         ));
     }
     page.add(&diag_group);
+
+    // ----- Blacklists -----
+    let bl_group = PreferencesGroup::builder()
+        .title("Blacklists")
+        .description(
+            "File and folder names the agent will skip when syncing. Each list takes \
+             comma-separated entries; press Enter or click the apply icon to save. \
+             The system defaults already cover common temp/junk patterns — only \
+             override if you know what you're doing.",
+        )
+        .build();
+    bl_group.add(&list_row(
+        "Names containing",
+        "Skip items whose name contains any of these substrings.",
+        agent.clone(), overlay.clone(), premium.clone(), ConfFile::Premium,
+        "blackListContains",
+    ));
+    bl_group.add(&list_row(
+        "Extensions",
+        "Skip items whose extension matches. Leading dot included (e.g. .tmp, .download).",
+        agent.clone(), overlay.clone(), premium.clone(), ConfFile::Premium,
+        "blackListExtensions",
+    ));
+    bl_group.add(&list_row(
+        "Names",
+        "Skip items whose full name matches exactly (e.g. thumbs.db, desktop.ini).",
+        agent.clone(), overlay.clone(), premium.clone(), ConfFile::Premium,
+        "blackListNames",
+    ));
+    bl_group.add(&list_row(
+        "Prefixes",
+        "Skip items whose name starts with any of these prefixes (e.g. .~, ._).",
+        agent.clone(), overlay.clone(), premium.clone(), ConfFile::Premium,
+        "blackListPrefixes",
+    ));
+    bl_group.add(&list_row(
+        "Remove from default extensions",
+        "Extensions to remove from odrive's built-in blacklist. Rarely needed.",
+        agent.clone(), overlay.clone(), premium.clone(), ConfFile::Premium,
+        "blackListExtensionsRemove",
+    ));
+    bl_group.add(&list_row(
+        "Remove from default names",
+        "Names to remove from odrive's built-in blacklist. Rarely needed.",
+        agent.clone(), overlay.clone(), premium.clone(), ConfFile::Premium,
+        "blackListNamesRemove",
+    ));
+    bl_group.add(&list_row(
+        "Remove from default prefixes",
+        "Prefixes to remove from odrive's built-in blacklist. Rarely needed.",
+        agent.clone(), overlay.clone(), premium.clone(), ConfFile::Premium,
+        "blackListPrefixesRemove",
+    ));
+    page.add(&bl_group);
 
     page
 }
@@ -585,6 +611,96 @@ fn spin_row(
     row.connect_value_notify(move |r| {
         let new = r.value() as i64;
         conf.borrow_mut()[key] = serde_json::Value::from(new);
+        write_conf(&agent, file, &conf.borrow(), &overlay);
+    });
+    row
+}
+
+/// Build a `ComboRow` for the `osTrashOverride` integer setting.
+/// Upstream accepts only 0/1/2 (any other value is silently ignored
+/// per `AdvancedSettingsController._configure`); we model that with a
+/// 3-option combo so users can't accidentally pick something the
+/// agent will discard. Stored in the GENERAL conf file.
+fn os_trash_override_row(
+    agent: Rc<OdriveAgent>,
+    overlay: ToastOverlay,
+    conf: Rc<RefCell<serde_json::Value>>,
+) -> ComboRow {
+    const LABELS: &[&str] = &[
+        "Use OS trash; permanent delete on failure (default)",
+        "Use OS trash; permanent delete if trash unavailable",
+        "Always permanent delete",
+    ];
+    // Slot 0 corresponds to value 0, slot 1 → 1, slot 2 → 2.
+    let initial = conf
+        .borrow()
+        .get("osTrashOverride")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0)
+        .clamp(0, 2) as u32;
+    let row = ComboRow::builder()
+        .title("OS trash behaviour")
+        .subtitle("How locally-deleted items are routed to the system trash.")
+        .model(&StringList::new(LABELS))
+        .build();
+    row.set_selected(initial);
+    row.connect_selected_notify(move |r| {
+        let v = r.selected() as i64;
+        conf.borrow_mut()["osTrashOverride"] = serde_json::Value::from(v);
+        write_conf(&agent, ConfFile::General, &conf.borrow(), &overlay);
+    });
+    row
+}
+
+/// Build an `EntryRow` bound to a JSON-array-of-strings key. Renders
+/// the array as comma-separated text; on apply (Enter or apply
+/// button), parses back into an array and writes the conf file.
+/// Empty entries (extra commas, trailing spaces) are stripped.
+///
+/// We deliberately use `connect_apply` rather than `connect_changed`
+/// — applying mid-typing would write a half-edited list to disk,
+/// which the agent would then read and apply.
+#[allow(clippy::too_many_arguments)]
+fn list_row(
+    title: &str,
+    subtitle: &str,
+    agent: Rc<OdriveAgent>,
+    overlay: ToastOverlay,
+    conf: Rc<RefCell<serde_json::Value>>,
+    file: ConfFile,
+    key: &'static str,
+) -> adw::EntryRow {
+    let initial = conf
+        .borrow()
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let row = adw::EntryRow::builder()
+        .title(title)
+        .text(&initial)
+        .show_apply_button(true)
+        .build();
+    // Subtitle on EntryRow isn't a builder property in 0.7; set it via
+    // the underlying ListBoxRow's tooltip/description tooling. The
+    // simplest path that's consistent with the GNOME look is to set
+    // the row's tooltip — users get the explanation on hover, and the
+    // group description carries the high-level guidance.
+    row.set_tooltip_text(Some(subtitle));
+    row.connect_apply(move |r| {
+        let text = r.text();
+        let items: Vec<serde_json::Value> = text
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| serde_json::Value::String(s.to_string()))
+            .collect();
+        conf.borrow_mut()[key] = serde_json::Value::Array(items);
         write_conf(&agent, file, &conf.borrow(), &overlay);
     });
     row
