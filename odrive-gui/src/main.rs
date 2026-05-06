@@ -29,6 +29,10 @@ fn main() {
 
     application.connect_startup(|_| {
         install_app_css();
+        // Resolves the window/launcher icon against the hicolor theme —
+        // `install-handlers` deposits PNGs under `apps/` named exactly this
+        // (matching the application_id, per FreeDesktop convention).
+        gtk::Window::set_default_icon_name("io.github.keithvassallomt.odrive-linux");
     });
 
     application.connect_activate(|app| {

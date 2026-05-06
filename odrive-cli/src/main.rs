@@ -255,6 +255,16 @@ const PLACEHOLDER_FOLDER_ICON: &str = "odrive-cloud-folder";
 /// from `odrive-icons/app-icon/`.
 const APP_MENU_ICON: &str = "odrive-menu";
 
+/// Icon name + .desktop file used by the GTK launcher (taskbar, app grid,
+/// window decorations). The icon name matches the GUI's `application_id`
+/// so `gtk::Window::set_default_icon_name(APP_LAUNCHER_ICON)` resolves
+/// against the same hicolor entries this installer writes. Same source
+/// PNGs as `APP_MENU_ICON` — both map to the odrive infinity logo — but
+/// landing under separate target names lets uninstall sweep them
+/// independently.
+const APP_LAUNCHER_ICON: &str = "io.github.keithvassallomt.odrive-linux";
+const APP_DESKTOP_NAME: &str = "io.github.keithvassallomt.odrive-linux.desktop";
+
 /// Cloud-file-type sub-MIMEs. Each entry: (icons subdir, mime/icon stem,
 /// glob patterns). The MIME stems become `application/vnd.odrive.<stem>-cloud`
 /// (e.g. `gdoc-cloud`); icons under `~/.local/share/icons/hicolor/<size>/mimetypes/`
@@ -676,6 +686,7 @@ fn install_handlers() -> Result<(), Box<dyn std::error::Error>> {
 
     let mime_path = format!("{}/{}", mime_pkg_dir, MIME_XML_NAME);
     let desktop_path = format!("{}/{}", app_dir, DESKTOP_NAME);
+    let launcher_desktop_path = format!("{}/{}", app_dir, APP_DESKTOP_NAME);
 
     std::fs::write(&mime_path, build_mime_xml())?;
 
@@ -691,6 +702,31 @@ fn install_handlers() -> Result<(), Box<dyn std::error::Error>> {
         exe_str, MIME_FILE, MIME_FOLDER,
     );
     std::fs::write(&desktop_path, desktop)?;
+
+    // Launcher .desktop for the GUI (taskbar, app grid, alt-tab). The
+    // Exec line is best-effort: we look for `odrive-gui` next to the
+    // running CLI, fall back to bare `odrive-gui` (assumes $PATH).
+    // StartupWMClass matches the GUI's application_id so window
+    // managers associate the running window with this entry.
+    let gui_exec = exe
+        .parent()
+        .map(|d| d.join("odrive-gui"))
+        .filter(|p| p.exists())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "odrive-gui".to_string());
+    let launcher_desktop = format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=odrive Manager\n\
+         Comment=Manage odrive cloud sync, mounts, and folder rules\n\
+         Exec={}\n\
+         Icon={}\n\
+         StartupWMClass={}\n\
+         Terminal=false\n\
+         Categories=Network;Utility;FileTransfer;\n",
+        gui_exec, APP_LAUNCHER_ICON, APP_LAUNCHER_ICON,
+    );
+    std::fs::write(&launcher_desktop_path, launcher_desktop)?;
 
     // Icons are optional: if the workspace odrive-icons/ dir isn't sitting
     // next to the binary (e.g. installed via `cargo install` without
@@ -738,6 +774,12 @@ fn install_handlers() -> Result<(), Box<dyn std::error::Error>> {
             "apps",
             APP_MENU_ICON,
         )?;
+        icon_files += install_icon_set(
+            &icons_dir.join("app-icon"),
+            &hicolor,
+            "apps",
+            APP_LAUNCHER_ICON,
+        )?;
         let _ = std::process::Command::new("gtk-update-icon-cache")
             .args(["-f", "-t"])
             .arg(&hicolor)
@@ -782,6 +824,7 @@ fn install_handlers() -> Result<(), Box<dyn std::error::Error>> {
     println!("Handlers installed:");
     println!("  {}", mime_path);
     println!("  {}", desktop_path);
+    println!("  {}", launcher_desktop_path);
     if icon_files > 0 {
         println!("  {} icon files under {}", icon_files, hicolor);
     }
@@ -797,10 +840,11 @@ fn uninstall_handlers() -> Result<(), Box<dyn std::error::Error>> {
     let xdg_data = xdg_data_home();
     let mime_path = format!("{}/mime/packages/{}", xdg_data, MIME_XML_NAME);
     let desktop_path = format!("{}/applications/{}", xdg_data, DESKTOP_NAME);
+    let launcher_desktop_path = format!("{}/applications/{}", xdg_data, APP_DESKTOP_NAME);
     let hicolor = format!("{}/icons/hicolor", xdg_data);
 
     let mut removed_any = false;
-    for path in [&mime_path, &desktop_path] {
+    for path in [&mime_path, &desktop_path, &launcher_desktop_path] {
         match std::fs::remove_file(path) {
             Ok(()) => {
                 println!("Removed {}", path);
@@ -834,7 +878,10 @@ fn uninstall_handlers() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let places_targets: Vec<String> = vec![odrive_core::MOUNT_FOLDER_ICON_NAME.to_string()];
-    let apps_targets: Vec<String> = vec![APP_MENU_ICON.to_string()];
+    let apps_targets: Vec<String> = vec![
+        APP_MENU_ICON.to_string(),
+        APP_LAUNCHER_ICON.to_string(),
+    ];
     let mut removed_icons = 0usize;
     if let Ok(entries) = std::fs::read_dir(&hicolor) {
         for size_dir in entries.flatten() {
