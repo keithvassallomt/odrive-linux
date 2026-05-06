@@ -1,17 +1,28 @@
 //! Mount detail and per-folder pages. Click a mount on the dashboard
-//! → `build_mount_root` pushes a page that either offers a one-time
-//! "Expand placeholders" action (heuristic: top-level has no real
-//! subdirectories yet) or shows the folder tree.
+//! → `build_mount_root` pushes a page that lists whatever's at the
+//! mount root. If the user navigates into an unexpanded `.cloudf`
+//! placeholder, the child page auto-runs a **single-level** `odrive
+//! sync` against that placeholder and shows live progress while it
+//! works. We deliberately do *not* recursively expand the whole tree
+//! up-front — that's odrive's anti-pattern (the placeholder model is
+//! built around lazy, on-demand expansion); a fresh Drive can take
+//! tens of minutes to recursively expand and produces nothing the user
+//! sees, since they navigate folder-by-folder anyway. See git log for
+//! the prior eager-expansion history.
 //!
-//! Drilling deeper pushes another page for each subfolder. That page
-//! shows two groups:
+//! Drilling deeper pushes another page for each subfolder. Subfolder
+//! pages show two groups:
 //!   1. `Folders` — clickable rows that push another page on the same
 //!      NavigationView, so navigation is just the standard back-button
-//!      stack.
+//!      stack. Unexpanded `.cloudf` children render with a download
+//!      icon and a "Not synced" caption; clicking them pushes a child
+//!      page that triggers single-level expansion.
 //!   2. `Sync rule` — One-Time or Automatic. One-Time exposes a
 //!      "Sync now" button that calls `agent.sync_recursive` without
 //!      `--nodownload`. Automatic exposes a Download Threshold combo,
 //!      an Apply-to-subfolders switch, and a Save / Delete button.
+//!      Both *are* recursive on purpose — they're scoped to a folder
+//!      the user explicitly chose.
 //!
 //! "Delete" semantics work around an upstream limitation: the agent
 //! has no foldersyncrule remove command, so we set the threshold to
@@ -26,11 +37,13 @@ use adw::{
     PreferencesGroup, PreferencesPage, ResponseAppearance, StatusPage, SwitchRow,
     Toast, ToastOverlay, ToolbarView,
 };
-use gtk::{Align, Button, Entry, Image, Label, StringList};
+use gtk::{glib, Align, Box as GtkBox, Button, Entry, Image, Label, Orientation, Spinner, StringList};
 use odrive_core::{FolderRule, FolderSyncThreshold, OdriveAgent, OdriveDb, OdriveError};
+use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 /// Top-level entry point: open the detail page for a mount root. Same
 /// page shape as a regular folder page, except that on first open we
@@ -123,19 +136,18 @@ struct PageState {
 }
 
 /// Build the right content widget for the current state and assign it
-/// as the toolbar's content, replacing whatever was there before.
+/// as the toolbar's content, replacing whatever was there before. Only
+/// one "needs expansion" case left: the folder isn't a real directory
+/// because there's a sibling `.cloudf` taking its place. Mount roots
+/// that contain only `.cloudf` children render normally — those
+/// children show as "Not synced" subfolder rows, and clicking one
+/// pushes a page that triggers single-level expansion.
 fn render_into_toolbar(state: &Rc<PageState>) {
     let path = Path::new(&state.folder_path);
-    // Two distinct "needs expansion" cases: (1) the folder exists as
-    // a real directory but its contents are all `.cloudf` placeholders
-    // — typical mount-root first-open state; (2) the folder isn't a
-    // real directory at all because there's a sibling `.cloudf` taking
-    // its place — happens when a user unsyncs a folder and then
-    // re-navigates back into it.
-    let needs_expansion = !path.is_dir() || (state.is_mount_root && !appears_expanded(path));
+    let needs_expansion = !path.is_dir();
 
     if needs_expansion {
-        state.toolbar.set_content(Some(&first_time_setup_widget(state)));
+        state.toolbar.set_content(Some(&expansion_widget(state)));
     } else {
         let page = PreferencesPage::new();
         page.set_margin_top(12);
@@ -147,28 +159,6 @@ fn render_into_toolbar(state: &Rc<PageState>) {
 
         state.toolbar.set_content(Some(&page));
     }
-}
-
-/// True iff a real directory has at least one child that's either a real
-/// subdirectory or a non-`.cloudf` file. Used only when the path is
-/// already known to be a real directory — otherwise the caller treats
-/// the folder as unexpanded by definition.
-fn appears_expanded(path: &Path) -> bool {
-    let Ok(entries) = fs::read_dir(path) else {
-        return false;
-    };
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if p.is_dir() {
-            return true;
-        }
-        if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-            if !name.ends_with(".cloudf") {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 /// If a `.cloudf` placeholder exists at `<folder_path>.cloudf`, return
@@ -183,64 +173,125 @@ fn placeholder_path(folder_path: &str) -> Option<String> {
     }
 }
 
-fn first_time_setup_widget(state: &Rc<PageState>) -> StatusPage {
+/// Auto-syncs the placeholder for this page's folder (single level —
+/// `odrive sync <path>.cloudf` without `--recursive`) and shows live
+/// progress while it works. The progress is two numbers: how many
+/// child entries have appeared on disk so far (the agent populates the
+/// folder incrementally with `.cloud`/`.cloudf` rows as it walks the
+/// remote level), and elapsed time. There's no Cancel button — the
+/// upstream CLI doesn't expose a cancel for an in-flight `sync`. On
+/// completion we re-render the page; render_into_toolbar then takes
+/// the !needs_expansion branch and shows the populated subfolder list.
+///
+/// Why auto-start instead of a click-to-start button: the user already
+/// expressed intent by drilling into this folder. Adding a confirmation
+/// click adds friction without giving them anything actionable to
+/// decide.
+fn expansion_widget(state: &Rc<PageState>) -> StatusPage {
     let status = StatusPage::builder()
         .icon_name("folder-download-symbolic")
-        .title("First-time setup")
+        .title("Expanding folder…")
         .description(
-            "We need to expand the folder placeholders before you can set per-folder sync rules. This won't download any file content.",
+            "Loading placeholders for this folder. We're not downloading any file content yet — just the metadata.",
         )
         .build();
 
-    let expand_btn = Button::builder()
-        .label("Expand placeholders")
-        .halign(Align::Center)
-        .build();
-    expand_btn.add_css_class("pill");
-    expand_btn.add_css_class("suggested-action");
+    // Spinner + count + elapsed line, vertically stacked under the
+    // StatusPage's title/description. The label is the bit we update
+    // from the polling timer; the spinner is decorative.
+    let body = GtkBox::new(Orientation::Vertical, 12);
+    body.set_halign(Align::Center);
+    let spinner = Spinner::new();
+    spinner.set_size_request(32, 32);
+    spinner.start();
+    let progress = Label::new(Some("Starting…"));
+    progress.add_css_class("dim-label");
+    body.append(&spinner);
+    body.append(&progress);
+    status.set_child(Some(&body));
 
-    {
-        let state = state.clone();
-        expand_btn.connect_clicked(move |btn| {
-            btn.set_sensitive(false);
-            btn.set_label("Expanding…");
-            // Two expansion paths:
-            //   - Folder is a real dir with only .cloudf children →
-            //     sync the folder itself recursively without download.
-            //   - Folder is gone, replaced by a sibling .cloudf
-            //     placeholder → sync that placeholder file. After
-            //     it succeeds the agent recreates the directory at
-            //     state.folder_path.
-            let target = placeholder_path(&state.folder_path)
-                .unwrap_or_else(|| state.folder_path.clone());
-            let agent_for_worker = state.agent.as_ref().clone();
-            let state_for_done = state.clone();
-            let btn_for_done = btn.clone();
-            spawn_sync(
-                &state.agent,
-                state.folder_path.clone(),
-                move || agent_for_worker.sync_recursive(&target, true),
-                move |result: Result<String, OdriveError>| {
-                    btn_for_done.set_sensitive(true);
-                    btn_for_done.set_label("Expand placeholders");
-                    match result {
-                        Ok(_) => {
-                            state_for_done
-                                .overlay
-                                .add_toast(Toast::new("Placeholders expanded"));
-                            render_into_toolbar(&state_for_done);
-                        }
-                        Err(e) => state_for_done
-                            .overlay
-                            .add_toast(Toast::new(&format!("Expansion failed: {}", e))),
-                    }
-                },
-            );
-        });
-    }
+    let target = placeholder_path(&state.folder_path)
+        .unwrap_or_else(|| state.folder_path.clone());
+    let agent_for_worker = state.agent.as_ref().clone();
+    let state_for_done = state.clone();
 
-    status.set_child(Some(&expand_btn));
+    // `in_flight` lives across the worker thread (via the on_done
+    // callback that fires on the GTK main thread) and the polling
+    // timer (also main thread). Cell because both touchers are
+    // single-threaded after the worker hands off; no need for atomics.
+    let in_flight = Rc::new(Cell::new(true));
+    let in_flight_for_timer = in_flight.clone();
+    let in_flight_for_done = in_flight.clone();
+
+    // Tick at 750ms — fast enough that a folder with ~thousands of
+    // children shows visible growth, slow enough that the read_dir
+    // loop doesn't bother the disk on a small folder. Reading a
+    // directory is cheap; counting entries on a 50k-child folder
+    // takes a few ms which is invisible at this cadence.
+    let target_dir = state.folder_path.clone();
+    let progress_for_timer = progress.clone();
+    let start = Instant::now();
+    glib::timeout_add_local(Duration::from_millis(750), move || {
+        if !in_flight_for_timer.get() {
+            return glib::ControlFlow::Break;
+        }
+        let count = count_dir_entries(&target_dir);
+        let elapsed = start.elapsed().as_secs();
+        let label = if count == 0 {
+            format!("Waiting for the agent… · {}s", elapsed)
+        } else {
+            format!(
+                "{} item{} so far · {}s",
+                count,
+                if count == 1 { "" } else { "s" },
+                elapsed,
+            )
+        };
+        progress_for_timer.set_text(&label);
+        glib::ControlFlow::Continue
+    });
+
+    spawn_sync(
+        &state.agent,
+        state.folder_path.clone(),
+        move || agent_for_worker.sync(&target),
+        move |result: Result<String, OdriveError>| {
+            in_flight_for_done.set(false);
+            match result {
+                Ok(_) => {
+                    state_for_done
+                        .overlay
+                        .add_toast(Toast::new("Folder expanded"));
+                    render_into_toolbar(&state_for_done);
+                }
+                Err(e) => state_for_done
+                    .overlay
+                    .add_toast(Toast::new(&format!("Expansion failed: {}", e))),
+            }
+        },
+    );
+
     status
+}
+
+/// Count direct children of `path`, excluding dotfiles (we never list
+/// or count those in the UI either). Returns 0 if the dir doesn't
+/// exist yet — common on the first poll after kicking off `sync`,
+/// since the agent recreates the dir from the `.cloudf` placeholder
+/// asynchronously.
+fn count_dir_entries(path: &str) -> usize {
+    let Ok(entries) = fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .map(|n| !n.starts_with('.'))
+                .unwrap_or(false)
+        })
+        .count()
 }
 
 fn build_subfolders_group(state: &Rc<PageState>) -> PreferencesGroup {
