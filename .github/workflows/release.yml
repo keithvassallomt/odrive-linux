@@ -42,7 +42,7 @@ jobs:
           echo "${HOME}/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Build .deb packages
         run: |
@@ -57,7 +57,7 @@ jobs:
           ls -la dist/
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: deb-packages
           path: dist/*.deb
@@ -87,7 +87,7 @@ jobs:
           echo "${HOME}/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Resolve version
         id: ver
@@ -123,7 +123,7 @@ jobs:
           ls -la dist/
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: rpm-packages
           path: dist/*.rpm
@@ -134,13 +134,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download .deb artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: deb-packages
           path: dist
 
       - name: Download .rpm artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: rpm-packages
           path: dist
@@ -155,7 +155,7 @@ jobs:
           fi
 
       - name: Upload to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           files: dist/*
