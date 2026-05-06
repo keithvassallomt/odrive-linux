@@ -126,6 +126,7 @@ kbuildsycoca6 --noincremental &>/dev/null || :
 %{_datadir}/applications/odrive-linux-open.desktop
 %{_datadir}/mime/packages/odrive-linux.xml
 %{_datadir}/icons/hicolor/*/apps/odrive-menu.png
+%{_datadir}/icons/hicolor/*/apps/odrive-linux-mascot.png
 %{_datadir}/icons/hicolor/*/apps/io.github.keithvassallomt.odrive-linux.png
 %{_datadir}/icons/hicolor/*/emblems/odrive-*.png
 %{_datadir}/icons/hicolor/*/mimetypes/odrive-*.png
