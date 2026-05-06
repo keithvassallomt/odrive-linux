@@ -144,6 +144,10 @@ pick_one() {
     done < <(compgen -G "${dir}/${pat}" || true)
 }
 
+tmpdir="$(mktemp -d)"
+chmod 0755 "$tmpdir"  # apt's _apt user needs to be able to read inside.
+trap 'rm -rf "$tmpdir"' EXIT
+
 if [ -n "$FROM_DIR" ]; then
     [ -d "$FROM_DIR" ] || die "--from-dir: ${FROM_DIR} is not a directory"
     FROM_DIR="$(cd "$FROM_DIR" && pwd)"
@@ -151,21 +155,34 @@ if [ -n "$FROM_DIR" ]; then
 
     case "$family" in
         deb)
-            base_pkg="$(pick_one "$FROM_DIR"      "odrive-linux_*_${arch_deb}.deb")"
-            nautilus_pkg="$(pick_one "$FROM_DIR"  "odrive-linux-nautilus_*_all.deb")"
-            dolphin_pkg="$(pick_one "$FROM_DIR"   "odrive-linux-dolphin_*_${arch_deb}.deb")"
+            src_base="$(pick_one "$FROM_DIR"     "odrive-linux_*_${arch_deb}.deb")"
+            src_nautilus="$(pick_one "$FROM_DIR" "odrive-linux-nautilus_*_all.deb")"
+            src_dolphin="$(pick_one "$FROM_DIR"  "odrive-linux-dolphin_*_${arch_deb}.deb")"
             ;;
         rpm)
-            base_pkg="$(pick_one "$FROM_DIR"      "odrive-linux-[0-9]*.${arch_rpm}.rpm")"
-            nautilus_pkg="$(pick_one "$FROM_DIR"  "odrive-linux-nautilus-[0-9]*.noarch.rpm")"
-            dolphin_pkg="$(pick_one "$FROM_DIR"   "odrive-linux-dolphin-[0-9]*.${arch_rpm}.rpm")"
+            src_base="$(pick_one "$FROM_DIR"     "odrive-linux-[0-9]*.${arch_rpm}.rpm")"
+            src_nautilus="$(pick_one "$FROM_DIR" "odrive-linux-nautilus-[0-9]*.noarch.rpm")"
+            src_dolphin="$(pick_one "$FROM_DIR"  "odrive-linux-dolphin-[0-9]*.${arch_rpm}.rpm")"
             ;;
     esac
 
-    [ -n "$base_pkg" ] || die "no base package found in ${FROM_DIR} (looked for odrive-linux* matching arch ${arch_deb}/${arch_rpm})"
+    [ -n "$src_base" ] || die "no base package found in ${FROM_DIR} (looked for odrive-linux* matching arch ${arch_deb}/${arch_rpm})"
+
+    # Copy into a world-readable tmpdir so apt's sandboxed _apt user
+    # can access them. (Files in $HOME are typically 0700-traversable
+    # only by the owner; apt warns and falls back to unsandboxed root,
+    # which is noisy even though the install still succeeds.)
+    cp "$src_base" "$tmpdir/" && base_pkg="$tmpdir/$(basename "$src_base")"
     log "base:     $(basename "$base_pkg")"
-    [ "$want_nautilus" -eq 1 ] && [ -n "$nautilus_pkg" ] && log "nautilus: $(basename "$nautilus_pkg")"
-    [ "$want_dolphin" -eq 1 ]  && [ -n "$dolphin_pkg"  ] && log "dolphin:  $(basename "$dolphin_pkg")"
+    if [ "$want_nautilus" -eq 1 ] && [ -n "$src_nautilus" ]; then
+        cp "$src_nautilus" "$tmpdir/" && nautilus_pkg="$tmpdir/$(basename "$src_nautilus")"
+        log "nautilus: $(basename "$nautilus_pkg")"
+    fi
+    if [ "$want_dolphin" -eq 1 ] && [ -n "$src_dolphin" ]; then
+        cp "$src_dolphin" "$tmpdir/" && dolphin_pkg="$tmpdir/$(basename "$src_dolphin")"
+        log "dolphin:  $(basename "$dolphin_pkg")"
+    fi
+    chmod 0644 "$tmpdir"/*
 else
     # ---------- GitHub release lookup ----------
     command -v curl >/dev/null 2>&1 || die "curl is required"
@@ -196,9 +213,6 @@ else
             dolphin_name="odrive-linux-dolphin-${ver}-1.fc41.${arch_rpm}.rpm"
             ;;
     esac
-
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' EXIT
 
     download() {
         local f="$1"
