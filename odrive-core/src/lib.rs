@@ -116,6 +116,32 @@ pub struct OdriveMount {
     pub status: String,
 }
 
+/// One trashed item as reported by `odrive status --trash`. The CLI's
+/// formatter joins `folderPath` and `name` so we only get the full
+/// local path back; the agent's IPC carries more (`name`, `folderPath`,
+/// `description`) but those are unreachable from outside the agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrashItem {
+    pub local_path: String,
+}
+
+/// Parse `odrive status --trash` output.
+///
+/// Truth table:
+/// - Empty output / "No trash." sentinel → empty Vec.
+/// - One line per trashed item, the full local path.
+/// - Surrounding blank lines tolerated.
+pub fn parse_trash_status(stdout: &str) -> Vec<TrashItem> {
+    stdout
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && *l != "No trash.")
+        .map(|l| TrashItem {
+            local_path: l.to_string(),
+        })
+        .collect()
+}
+
 /// Compose the odrive web-app URL (`https://www.odrive.com/browse/<path>`)
 /// for a local filesystem path, using the supplied mount list to resolve
 /// which remote namespace the path belongs to. Pure: no I/O. Returns an
@@ -1020,6 +1046,65 @@ curl -fL "https://dl.odrive.com/odrivecli-lnx-64" | tar -xzf- -C "$od/"
         Ok(parse_mounts(&stdout))
     }
 
+    /// `odrive status --trash` → list of trashed items.
+    pub fn get_trash_items(&self) -> Result<Vec<TrashItem>, OdriveError> {
+        let output = Command::new(&self.bin_path)
+            .arg("status")
+            .arg("--trash")
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let msg = if !stderr.is_empty() { stderr } else { stdout };
+            return Err(OdriveError::CliError(format!(
+                "odrive status --trash failed: {}",
+                msg
+            )));
+        }
+        Ok(parse_trash_status(&String::from_utf8_lossy(&output.stdout)))
+    }
+
+    /// `odrive restoretrash` — bulk restore. The IPC `restoretrash` command
+    /// does not accept any item filter (verified end-to-end against a live
+    /// agent): every parameter shape — `{}`, `{"path": <p>}`, bogus paths —
+    /// dispatches the same `restore_all_deletes()` codepath. Per-item
+    /// restore exists in `TrashController.restore_delete(o2Path)` but is
+    /// only callable in-process; macOS/Windows desktop GUIs reach it
+    /// directly because they're embedded Python, not over a socket.
+    pub fn restore_trash(&self) -> Result<String, OdriveError> {
+        let output = Command::new(&self.bin_path)
+            .arg("restoretrash")
+            .output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let msg = if !stderr.is_empty() { stderr } else { stdout };
+            return Err(OdriveError::CliError(format!(
+                "odrive restoretrash failed: {}",
+                msg
+            )));
+        }
+        Ok(stdout)
+    }
+
+    /// `odrive emptytrash` — bulk permanent delete. Same shape limit as
+    /// `restoretrash`: no per-item form exists.
+    pub fn empty_trash(&self) -> Result<String, OdriveError> {
+        let output = Command::new(&self.bin_path)
+            .arg("emptytrash")
+            .output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let msg = if !stderr.is_empty() { stderr } else { stdout };
+            return Err(OdriveError::CliError(format!(
+                "odrive emptytrash failed: {}",
+                msg
+            )));
+        }
+        Ok(stdout)
+    }
+
     pub fn get_db_path(&self) -> String {
         format!("{}/.odrive-linux.db", self.home)
     }
@@ -1512,6 +1597,51 @@ xlThreshold: medium
         assert!(unit.contains("WantedBy=default.target"));
         // No leftover `%h` placeholder from the upstream-template version.
         assert!(!unit.contains("%h"));
+    }
+
+    #[test]
+    fn parse_trash_status_empty_sentinel() {
+        // The agent's TrashStatus controller emits "No trash.\n" when the
+        // trash list is empty — not a path, so the parser must drop it.
+        let items = parse_trash_status("No trash.\n");
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn parse_trash_status_single_item() {
+        let items = parse_trash_status("/home/keith/odrive/Google Drive/testfile.txt\n");
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].local_path,
+            "/home/keith/odrive/Google Drive/testfile.txt"
+        );
+    }
+
+    #[test]
+    fn parse_trash_status_multiple_items_with_blank_lines() {
+        let s = "\n/home/keith/odrive/Google Drive/a.txt\n\
+                 /home/keith/odrive/Google Drive/sub/b.txt\n\
+                 \n\
+                 /home/keith/odrive/OneDrive/c.txt\n";
+        let items = parse_trash_status(s);
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].local_path, "/home/keith/odrive/Google Drive/a.txt");
+        assert_eq!(
+            items[1].local_path,
+            "/home/keith/odrive/Google Drive/sub/b.txt"
+        );
+        assert_eq!(items[2].local_path, "/home/keith/odrive/OneDrive/c.txt");
+    }
+
+    #[test]
+    fn parse_trash_status_no_trash_among_real_lines_still_filtered() {
+        // Defensive: if the agent ever surrounded "No trash." with other
+        // banner text we still filter that exact sentinel string. Real
+        // paths next to it parse normally.
+        let s = "No trash.\n/home/keith/odrive/x.txt\n";
+        let items = parse_trash_status(s);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].local_path, "/home/keith/odrive/x.txt");
     }
 }
 

@@ -2,6 +2,7 @@ mod indicator;
 mod log_viewer;
 mod mount_detail;
 mod settings_page;
+mod trash_page;
 mod wizard;
 mod worker;
 
@@ -219,11 +220,7 @@ fn build_dashboard_page(
         .add_titled_with_icon(&encrypt, Some("encrypt"), "Encrypt", "channel-secure-symbolic")
         .set_icon_name(Some("channel-secure-symbolic"));
 
-    let trash = stub_status_page(
-        "Trash",
-        "Trash management will live here.",
-        "user-trash-symbolic",
-    );
+    let trash = trash_page::build_trash_page(agent.clone(), overlay.clone());
     stack
         .add_titled_with_icon(&trash, Some("trash"), "Trash", "user-trash-symbolic")
         .set_icon_name(Some("user-trash-symbolic"));
