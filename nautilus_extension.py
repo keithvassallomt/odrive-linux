@@ -258,15 +258,6 @@ class OdriveExtension(GObject.GObject, Nautilus.MenuProvider, Nautilus.InfoProvi
         refresh_item.connect('activate', self.on_refresh_clicked, in_mount_any)
         submenu.append_item(refresh_item)
 
-        # Share Link — generate a public URL and open it in the browser.
-        share_item = Nautilus.MenuItem(
-            name='OdriveMenu::ShareLink',
-            label='Share Link',
-            tip='Generate a share link and open it in the browser'
-        )
-        share_item.connect('activate', self.on_share_link_clicked, in_mount_any)
-        submenu.append_item(share_item)
-
         # Share Storage — static link to odrive's Spaces feature page; no
         # per-item state involved, so the action ignores the selection.
         storage_item = Nautilus.MenuItem(
@@ -277,7 +268,12 @@ class OdriveExtension(GObject.GObject, Nautilus.MenuProvider, Nautilus.InfoProvi
         storage_item.connect('activate', self.on_share_storage_clicked)
         submenu.append_item(storage_item)
 
-        # Copy Share Link — same URL, written to the clipboard instead.
+        # Copy Share Link — generate a one-shot share URL via the agent
+        # and place it on the clipboard. macOS/Windows ship a richer
+        # "Share Link" item that opens odrive's web sharing dialog
+        # (configure permissions/expiry/password); that flow needs the
+        # agent's session token and odrive ships its DBs encrypted with
+        # SEE, so it's unreachable from outside the agent process.
         copy_item = Nautilus.MenuItem(
             name='OdriveMenu::CopyShareLink',
             label='Copy Share Link',
@@ -332,13 +328,6 @@ class OdriveExtension(GObject.GObject, Nautilus.MenuProvider, Nautilus.InfoProvi
             except (subprocess.CalledProcessError, FileNotFoundError):
                 pass
         return urls
-
-    def on_share_link_clicked(self, menu, paths):
-        for url in self._generate_share_links(paths):
-            subprocess.Popen(['xdg-open', url],
-                             stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL,
-                             start_new_session=True)
 
     def on_share_storage_clicked(self, menu):
         subprocess.Popen(['xdg-open', 'https://www.odrive.com/features/spaces'],
