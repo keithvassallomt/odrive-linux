@@ -1,0 +1,11 @@
+{
+    "KPlugin": {
+        "Description": "Paints odrive-synced / odrive-syncing overlays on icons inside odrive mounts.",
+        "License": "AGPL-3.0-or-later",
+        "Name": "odrive Overlays",
+        "ServiceTypes": [
+            "KOverlayIconPlugin"
+        ],
+        "Version": "0.1.0"
+    }
+}

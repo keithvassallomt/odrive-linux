@@ -1490,28 +1490,100 @@ pub fn pad_placeholder(path: &Path) -> std::io::Result<bool> {
 pub const MOUNT_FOLDER_ICON_NAME: &str = "odrive-mount-folder";
 
 /// Mark `local_path` (typically an odrive mount root) with a custom
-/// icon name via GVFS metadata. Nautilus / Files honours
-/// `metadata::custom-icon-name` when rendering folder icons, so as
-/// long as the named icon is in the user's icon theme the folder
-/// renders with our bundled main-folder art instead of the generic
-/// folder icon.
+/// icon. We hit two channels because GNOME and KDE look in different
+/// places:
 ///
-/// Best-effort. Failures (no `gio` binary, non-GVFS environment, the
-/// path not under a GVFS-aware mount) are returned as `Err` for
-/// callers that want to surface them, but every current call site
-/// ignores the result — degrading to the default folder icon is
-/// preferable to bubbling a metadata error to the user.
+///  - **`.directory` file** in the folder itself, with `[Desktop Entry]
+///    Icon=<name>` — FreeDesktop standard, what KDE Plasma / Dolphin
+///    read. GNOME also honours it as a fallback.
+///  - **GVFS metadata** (`gio set metadata::custom-icon-name`) — what
+///    Nautilus reads first for local-path icon resolution. Dolphin
+///    doesn't consult GVFS metadata for non-network paths, so for KDE
+///    parity we have to write the .directory file too.
+///
+/// Writing into a watched mount means the agent would happily upload
+/// `.directory` to the user's Drive root unless we blacklist it first
+/// — which is what `ensure_directory_blacklisted` does. We call that
+/// helper here so the per-mount path is safe even if `install-handlers`
+/// hasn't run; it sleeps ~3s on the *first* call so the agent's
+/// `~2s` mtime-poll has a chance to reload its conf before we drop
+/// the file.
+///
+/// Best-effort. Failures (no `gio` binary, non-GVFS environment,
+/// missing premium conf, etc.) are returned as `Err` but every current
+/// call site ignores the result — degrading to the default folder
+/// icon is preferable to bubbling a metadata error to the user.
 pub fn set_folder_custom_icon(local_path: &str, icon_name: &str) -> std::io::Result<()> {
-    let status = Command::new("gio")
+    if let Ok(home) = std::env::var("HOME") {
+        // Add `.directory` to the agent's blackListNames so the file we're
+        // about to drop doesn't end up uploaded. Best-effort: a missing
+        // conf file (agent not installed) just means there's nothing to
+        // upload anyway.
+        let _ = ensure_directory_blacklisted(&home);
+    }
+
+    let dir_file = format!("{}/.directory", local_path);
+    let body = format!("[Desktop Entry]\nIcon={}\n", icon_name);
+    fs::write(&dir_file, body)?;
+
+    // GVFS metadata for Nautilus. Best-effort — non-zero exit (no gio
+    // binary, non-GVFS path, etc.) doesn't justify failing the whole
+    // operation since the .directory file alone covers Plasma and is
+    // a fallback in GNOME.
+    let _ = Command::new("gio")
         .arg("set")
         .arg(local_path)
         .arg("metadata::custom-icon-name")
         .arg(icon_name)
-        .status()?;
-    if !status.success() {
-        return Err(std::io::Error::other("gio set metadata::custom-icon-name failed"));
-    }
+        .status();
+
     Ok(())
+}
+
+/// Ensure `.directory` is in the agent's `blackListNames` so the
+/// per-folder marker file we drop into mount roots (`set_folder_custom_icon`)
+/// doesn't get uploaded. Idempotent: returns `Ok(true)` only when we
+/// actually added the entry, in which case we sleep ~3s before
+/// returning so the agent's mtime-based conf reload has time to pick
+/// it up before any caller writes the file. On `Ok(false)` (already
+/// present) we return immediately. Missing premium conf (agent not
+/// installed yet) returns an `Err` the caller can ignore.
+pub fn ensure_directory_blacklisted(home: &str) -> std::io::Result<bool> {
+    let conf_path = format!("{}/.odrive-agent/odrive_user_premium_conf.txt", home);
+    let mut conf = read_conf_file(&conf_path).map_err(|e| {
+        std::io::Error::other(format!("read premium conf: {}", e))
+    })?;
+
+    let changed = {
+        let names_existing = conf
+            .get("blackListNames")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().any(|v| v.as_str() == Some(".directory")))
+            .unwrap_or(false);
+        if names_existing {
+            false
+        } else if let Some(obj) = conf.as_object_mut() {
+            let entry = obj.entry("blackListNames".to_string())
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+            if let Some(arr) = entry.as_array_mut() {
+                arr.push(serde_json::Value::String(".directory".to_string()));
+            }
+            true
+        } else {
+            false
+        }
+    };
+
+    if changed {
+        write_conf_file(&conf_path, &conf).map_err(|e| {
+            std::io::Error::other(format!("write premium conf: {}", e))
+        })?;
+        // The agent polls conf mtime every ~2s; sleep slightly longer so
+        // the reload has actually fired before we (or our caller) drop
+        // the .directory file. Only paid on first-ever call.
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+    Ok(changed)
 }
 
 /// Inverse of `set_folder_custom_icon`: strip the custom-icon metadata
@@ -1637,12 +1709,22 @@ pub fn write_conf_file(path: &str, v: &serde_json::Value) -> Result<(), OdriveEr
 }
 
 pub fn unset_folder_custom_icon(local_path: &str) -> std::io::Result<()> {
-    let status = Command::new("gio")
-        .args(["set", "-t", "unset", local_path, "metadata::custom-icon-name"])
-        .status()?;
-    if !status.success() {
-        return Err(std::io::Error::other("gio set -t unset failed"));
+    // Drop the .directory file we wrote for KDE. Missing file is fine
+    // (best-effort path, e.g. user already removed it manually).
+    let dir_file = format!("{}/.directory", local_path);
+    if let Err(e) = fs::remove_file(&dir_file) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            // Non-NotFound errors bubble — caller decides whether to
+            // surface or swallow. We don't blow up on missing.
+            return Err(e);
+        }
     }
+    // Strip GVFS metadata for Nautilus. Best-effort: non-GVFS environment
+    // gives no exit signal worth surfacing, since the `.directory`
+    // removal already covered the only file artefact.
+    let _ = Command::new("gio")
+        .args(["set", "-t", "unset", local_path, "metadata::custom-icon-name"])
+        .status();
     Ok(())
 }
 

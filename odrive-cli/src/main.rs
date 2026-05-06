@@ -42,8 +42,25 @@ enum Commands {
         /// Path to the item (placeholder or materialised) to share
         path: String,
     },
+    /// Generate share links for one or more paths and copy them to the system
+    /// clipboard (newline-joined). Used by the Dolphin "Copy Share Link"
+    /// service-menu action; equivalent to the GTK in-process clipboard write
+    /// the Nautilus extension does. Falls back to wl-copy / xclip depending
+    /// on the session.
+    CopyShareLink {
+        /// One or more paths under an odrive mount
+        #[arg(required = true)]
+        paths: Vec<String>,
+    },
     /// Compose the odrive web-app URL for a local path. Prints the URL on stdout.
     Weburl {
+        /// Path to the item under an odrive mount
+        path: String,
+    },
+    /// Compose the odrive web-app URL for a path and xdg-open it in the
+    /// browser. Used by the Dolphin "Open Web Preview" service-menu action;
+    /// equivalent to the Nautilus extension's `weburl + xdg-open` pipeline.
+    OpenWebPreview {
         /// Path to the item under an odrive mount
         path: String,
     },
@@ -165,6 +182,18 @@ fn main() {
                 }
             }
         }
+        Some(Commands::CopyShareLink { paths }) => {
+            if let Err(e) = copy_share_link(&agent, &paths) {
+                eprintln!("copy-share-link failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Some(Commands::OpenWebPreview { path }) => {
+            if let Err(e) = open_web_preview(&agent, &path) {
+                eprintln!("open-web-preview failed: {}", e);
+                std::process::exit(1);
+            }
+        }
         Some(Commands::Refresh { path }) => {
             println!("Refreshing {}...", path);
             match agent.refresh(&path) {
@@ -238,10 +267,133 @@ fn strip_placeholder_suffix(path: &str) -> String {
     }
 }
 
+/// Best-effort desktop notification via `notify-send` (libnotify). KDE,
+/// GNOME, and most other DEs ship this; if it's missing we silently skip
+/// — the action's primary effect (clipboard write or browser launch)
+/// already happened, so the missing notification is cosmetic.
+fn notify(summary: &str, body: &str) {
+    let _ = std::process::Command::new("notify-send")
+        .args(["-a", "odrive", "-i", APP_LAUNCHER_ICON])
+        .arg(summary)
+        .arg(body)
+        .status();
+}
+
+/// Generate share links for each path and place the newline-joined list on
+/// the system clipboard. Wayland sessions get `wl-copy`; X11 sessions get
+/// `xclip`. We don't have GTK in-process here (this is the headless CLI
+/// path used by Dolphin's service menu), so we shell out — Nautilus's
+/// in-process Gdk.Clipboard.set_content path is the equivalent on the
+/// Python extension side. A success notification confirms the copy since
+/// service-menu actions don't surface stdout.
+fn copy_share_link(agent: &OdriveAgent, paths: &[String]) -> Result<(), String> {
+    let mut urls: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    for p in paths {
+        match agent.share_link(p) {
+            Ok(url) => {
+                let trimmed = url.trim();
+                if !trimmed.is_empty() {
+                    urls.push(trimmed.to_string());
+                }
+            }
+            Err(e) => errors.push(format!("{}: {}", p, e)),
+        }
+    }
+
+    if urls.is_empty() {
+        let detail = if errors.is_empty() {
+            "No share links were generated.".to_string()
+        } else {
+            errors.join("\n")
+        };
+        notify("odrive — share link failed", &detail);
+        return Err(detail);
+    }
+
+    let text = urls.join("\n");
+    write_clipboard(&text)?;
+
+    let summary = if urls.len() == 1 {
+        "Share link copied".to_string()
+    } else {
+        format!("{} share links copied", urls.len())
+    };
+    let body = if errors.is_empty() {
+        text.clone()
+    } else {
+        format!("{}\n\nFailed:\n{}", text, errors.join("\n"))
+    };
+    notify(&summary, &body);
+    Ok(())
+}
+
+/// Pipe `text` to wl-copy (Wayland) or xclip (X11). Returns a string
+/// error if the chosen tool is missing or exits non-zero — the caller
+/// surfaces that as a notification + non-zero exit so `Exec=` invocations
+/// don't silently lose data.
+fn write_clipboard(text: &str) -> Result<(), String> {
+    use std::io::Write;
+    let on_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+    let (tool, args): (&str, &[&str]) = if on_wayland {
+        ("wl-copy", &[])
+    } else {
+        ("xclip", &["-selection", "clipboard"])
+    };
+
+    let mut child = std::process::Command::new(tool)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("{} not available ({}). Install wl-clipboard (Wayland) or xclip (X11).", tool, e))?;
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|e| format!("write to {}: {}", tool, e))?;
+    }
+    let status = child
+        .wait()
+        .map_err(|e| format!("wait for {}: {}", tool, e))?;
+    if !status.success() {
+        return Err(format!("{} exited with status {}", tool, status));
+    }
+    Ok(())
+}
+
+/// Compose the odrive web URL for `path` and xdg-open it. Surfaces any
+/// failure as a notification so users right-clicking from Dolphin don't
+/// just see nothing happen.
+fn open_web_preview(agent: &OdriveAgent, path: &str) -> Result<(), String> {
+    let url = agent
+        .web_url(path)
+        .map_err(|e| {
+            let msg = format!("{}: {}", path, e);
+            notify("odrive — Open Web Preview failed", &msg);
+            msg
+        })?;
+    std::process::Command::new("xdg-open")
+        .arg(&url)
+        .spawn()
+        .map_err(|e| {
+            let msg = format!("xdg-open: {}", e);
+            notify("odrive — Open Web Preview failed", &msg);
+            msg
+        })?;
+    Ok(())
+}
+
 const MIME_FILE: &str = "application/vnd.odrive.placeholder-file";
 const MIME_FOLDER: &str = "application/vnd.odrive.placeholder-folder";
 const MIME_XML_NAME: &str = "odrive-linux.xml";
 const DESKTOP_NAME: &str = "odrive-linux-open.desktop";
+
+/// Legacy KDE service-menu .desktop name. We previously wrote a static
+/// service menu here; the integration is now handled by the C++
+/// `KFileItemActionPlugin` shipped from `dolphin-plugin/`. We keep the
+/// constant only so `uninstall-handlers` can sweep the legacy file from
+/// systems that ran an earlier `install-handlers`.
+const LEGACY_SERVICEMENU_NAME: &str = "odrive-linux.desktop";
 
 /// Icon names bound to the two generic placeholder MIME types. Concrete
 /// `.gdocx.cloud`-style sub-MIMEs override these via their own `<icon>`
@@ -365,6 +517,54 @@ fn install_icon_set(
         std::fs::create_dir_all(&dst_dir)?;
         let dst = format!("{}/{}.png", dst_dir, target_name);
         std::fs::copy(&path, &dst)?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// Copy the smallest source PNG in `src_dir` (parsed via the
+/// `parse_icon_size` underscore-separated filename convention) into a
+/// hardcoded list of small-size hicolor buckets under `category`.
+/// Used for emblems, where Plasma's overlay renderer demands a small
+/// bucket but the asset bundle only ships large masters; same trick
+/// the tray-icon install uses for SNI panel hosts. Returns the count
+/// of files copied. A missing / empty src dir yields `Ok(0)` — same
+/// defensive shape as the other icon installers.
+fn install_small_size_shims(
+    src_dir: &std::path::Path,
+    hicolor: &str,
+    category: &str,
+    target_name: &str,
+) -> std::io::Result<usize> {
+    if !src_dir.is_dir() {
+        return Ok(0);
+    }
+    let mut smallest: Option<(u32, std::path::PathBuf)> = None;
+    for entry in std::fs::read_dir(src_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("png") {
+            continue;
+        }
+        let stem = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s,
+            None => continue,
+        };
+        let Some(size) = parse_icon_size(stem) else { continue };
+        match &smallest {
+            None => smallest = Some((size, path)),
+            Some((cur, _)) if size < *cur => smallest = Some((size, path)),
+            _ => {}
+        }
+    }
+    let Some((_, src)) = smallest else {
+        return Ok(0);
+    };
+    let mut count = 0usize;
+    for size in ["16x16", "22x22", "48x48"] {
+        let dst_dir = format!("{}/{}/{}", hicolor, size, category);
+        std::fs::create_dir_all(&dst_dir)?;
+        std::fs::copy(&src, format!("{}/{}.png", dst_dir, target_name))?;
         count += 1;
     }
     Ok(count)
@@ -728,6 +928,22 @@ fn install_handlers() -> Result<(), Box<dyn std::error::Error>> {
     );
     std::fs::write(&launcher_desktop_path, launcher_desktop)?;
 
+    // Sweep any leftover legacy Plasma service-menu .desktop from a
+    // prior install — superseded by the C++ KFileItemActionPlugin in
+    // dolphin-plugin/. Best-effort: missing file is fine.
+    let legacy_servicemenu = format!(
+        "{}/kio/servicemenus/{}",
+        xdg_data, LEGACY_SERVICEMENU_NAME
+    );
+    if std::path::Path::new(&legacy_servicemenu).exists() {
+        if let Err(e) = std::fs::remove_file(&legacy_servicemenu) {
+            eprintln!("Warning: could not remove legacy service menu {}: {}",
+                legacy_servicemenu, e);
+        } else {
+            println!("Removed legacy service menu {}", legacy_servicemenu);
+        }
+    }
+
     // Icons are optional: if the workspace odrive-icons/ dir isn't sitting
     // next to the binary (e.g. installed via `cargo install` without
     // copying assets), we still register MIME types and the .desktop
@@ -736,6 +952,23 @@ fn install_handlers() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(icons_dir) = find_icons_dir() {
         for (subdir, name) in EMBLEMS {
             icon_files += install_icon_set(
+                &icons_dir.join("emblems").join(subdir),
+                &hicolor,
+                "emblems",
+                name,
+            )?;
+            // Plasma's KOverlayIconPlugin renders emblems at small
+            // sizes (16/22/48 px depending on view zoom) and looks them
+            // up by walking *upward* through hicolor size buckets — but
+            // it doesn't always fall back from 256x256 down. The
+            // emblem source bundle only ships 256/512/1024, so without
+            // a small-size shim Dolphin sometimes silently fails to
+            // resolve the icon and the overlay never paints. Mirror
+            // the same fix `install_tray_icon` uses for SNI panels:
+            // copy the smallest available source into the standard
+            // small buckets. Nautilus is more forgiving and didn't
+            // need this; Dolphin is stricter.
+            icon_files += install_small_size_shims(
                 &icons_dir.join("emblems").join(subdir),
                 &hicolor,
                 "emblems",
@@ -841,10 +1074,11 @@ fn uninstall_handlers() -> Result<(), Box<dyn std::error::Error>> {
     let mime_path = format!("{}/mime/packages/{}", xdg_data, MIME_XML_NAME);
     let desktop_path = format!("{}/applications/{}", xdg_data, DESKTOP_NAME);
     let launcher_desktop_path = format!("{}/applications/{}", xdg_data, APP_DESKTOP_NAME);
+    let legacy_servicemenu = format!("{}/kio/servicemenus/{}", xdg_data, LEGACY_SERVICEMENU_NAME);
     let hicolor = format!("{}/icons/hicolor", xdg_data);
 
     let mut removed_any = false;
-    for path in [&mime_path, &desktop_path, &launcher_desktop_path] {
+    for path in [&mime_path, &desktop_path, &launcher_desktop_path, &legacy_servicemenu] {
         match std::fs::remove_file(path) {
             Ok(()) => {
                 println!("Removed {}", path);

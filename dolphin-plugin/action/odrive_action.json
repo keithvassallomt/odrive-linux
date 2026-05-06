@@ -1,0 +1,17 @@
+{
+    "KPlugin": {
+        "Description": "Adds odrive cloud-sync actions to Dolphin's right-click menu (Sync, Unsync, Refresh, Copy Share Link, Open Web Preview).",
+        "License": "AGPL-3.0-or-later",
+        "MimeTypes": [
+            "application/octet-stream",
+            "inode/directory",
+            "application/vnd.odrive.placeholder-file",
+            "application/vnd.odrive.placeholder-folder"
+        ],
+        "Name": "odrive Actions",
+        "ServiceTypes": [
+            "KFileItemAction/Plugin"
+        ],
+        "Version": "0.1.0"
+    }
+}
