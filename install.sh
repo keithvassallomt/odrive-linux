@@ -12,6 +12,10 @@
 #
 # Flags:
 #   --tag <vX.Y.Z>    install a specific release instead of latest
+#   --from-dir <dir>  install from a local directory of .deb / .rpm files
+#                     (skips GitHub entirely — used to test built artifacts
+#                     before tagging a release; works against `dist/` after
+#                     `packaging/build-local.sh`)
 #   --base-only       skip Nautilus/Dolphin integration even if the DE
 #                     would normally pull one
 #   --all             install both Nautilus and Dolphin integration
@@ -27,6 +31,7 @@ RELEASE_API_TAG="https://api.github.com/repos/${REPO}/releases/tags"
 
 # ---------- args ----------
 TAG=""
+FROM_DIR=""
 BASE_ONLY=0
 ALL=0
 DRY_RUN=0
@@ -34,6 +39,8 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --tag) TAG="$2"; shift 2 ;;
         --tag=*) TAG="${1#*=}"; shift ;;
+        --from-dir) FROM_DIR="$2"; shift 2 ;;
+        --from-dir=*) FROM_DIR="${1#*=}"; shift ;;
         --base-only) BASE_ONLY=1; shift ;;
         --all) ALL=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
@@ -41,6 +48,11 @@ while [ $# -gt 0 ]; do
         *) echo "unknown flag: $1" >&2; exit 2 ;;
     esac
 done
+
+if [ -n "$TAG" ] && [ -n "$FROM_DIR" ]; then
+    echo "--tag and --from-dir are mutually exclusive" >&2
+    exit 2
+fi
 
 # ---------- helpers ----------
 log()  { printf '\033[1;34m>>>\033[0m %s\n' "$*"; }
@@ -116,55 +128,98 @@ fi
 
 log "integration: nautilus=${want_nautilus} dolphin=${want_dolphin}"
 
-# ---------- find release ----------
-command -v curl >/dev/null 2>&1 || die "curl is required"
-
-if [ -n "$TAG" ]; then
-    api="${RELEASE_API_TAG}/${TAG}"
-else
-    api="$RELEASE_API_LATEST"
-fi
-log "querying ${api}"
-release_json="$(curl -fsSL "$api")" || die "could not query GitHub releases"
-
-tag="$(printf '%s' "$release_json" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name"[^"]*"([^"]+)".*/\1/')"
-[ -n "$tag" ] || die "no tag_name in release response"
-ver="${tag#v}"
-log "release: ${tag}"
-
-# ---------- asset names ----------
-case "$family" in
-    deb)
-        base_pkg="odrive-linux_${ver}_${arch_deb}.deb"
-        nautilus_pkg="odrive-linux-nautilus_${ver}_all.deb"
-        dolphin_pkg="odrive-linux-dolphin_${ver}_${arch_deb}.deb"
-        ;;
-    rpm)
-        base_pkg="odrive-linux-${ver}-1.${arch_rpm}.rpm"
-        nautilus_pkg="odrive-linux-nautilus-${ver}-1.noarch.rpm"
-        dolphin_pkg="odrive-linux-dolphin-${ver}-1.${arch_rpm}.rpm"
-        ;;
-esac
-
-# ---------- download ----------
-tmpdir="$(mktemp -d)"
-trap 'rm -rf "$tmpdir"' EXIT
-
-download() {
-    local f="$1"
-    log "downloading ${f}"
-    run "curl -fL --progress-bar -o '$tmpdir/$f' 'https://github.com/${REPO}/releases/download/${tag}/${f}'" \
-        || die "download failed: ${f}"
+# ---------- locate packages ----------
+# Pick a single best match for a glob, excluding debug subpackages. Empty
+# string if nothing matches. Used by both --from-dir and the soon-to-be-
+# fetched tmpdir; keeps the caller's selection logic uniform.
+pick_one() {
+    local dir="$1" pat="$2" f
+    # `compgen -G` does the glob without a non-zero exit on no-match.
+    while IFS= read -r f; do
+        case "$(basename "$f")" in
+            *-dbgsym_*|*-debuginfo-*|*-debugsource-*) continue ;;
+        esac
+        echo "$f"
+        return
+    done < <(compgen -G "${dir}/${pat}" || true)
 }
 
-download "$base_pkg"
-[ "$want_nautilus" -eq 1 ] && download "$nautilus_pkg"
-[ "$want_dolphin" -eq 1 ]  && download "$dolphin_pkg"
+if [ -n "$FROM_DIR" ]; then
+    [ -d "$FROM_DIR" ] || die "--from-dir: ${FROM_DIR} is not a directory"
+    FROM_DIR="$(cd "$FROM_DIR" && pwd)"
+    log "installing from local directory: ${FROM_DIR}"
+
+    case "$family" in
+        deb)
+            base_pkg="$(pick_one "$FROM_DIR"      "odrive-linux_*_${arch_deb}.deb")"
+            nautilus_pkg="$(pick_one "$FROM_DIR"  "odrive-linux-nautilus_*_all.deb")"
+            dolphin_pkg="$(pick_one "$FROM_DIR"   "odrive-linux-dolphin_*_${arch_deb}.deb")"
+            ;;
+        rpm)
+            base_pkg="$(pick_one "$FROM_DIR"      "odrive-linux-[0-9]*.${arch_rpm}.rpm")"
+            nautilus_pkg="$(pick_one "$FROM_DIR"  "odrive-linux-nautilus-[0-9]*.noarch.rpm")"
+            dolphin_pkg="$(pick_one "$FROM_DIR"   "odrive-linux-dolphin-[0-9]*.${arch_rpm}.rpm")"
+            ;;
+    esac
+
+    [ -n "$base_pkg" ] || die "no base package found in ${FROM_DIR} (looked for odrive-linux* matching arch ${arch_deb}/${arch_rpm})"
+    log "base:     $(basename "$base_pkg")"
+    [ "$want_nautilus" -eq 1 ] && [ -n "$nautilus_pkg" ] && log "nautilus: $(basename "$nautilus_pkg")"
+    [ "$want_dolphin" -eq 1 ]  && [ -n "$dolphin_pkg"  ] && log "dolphin:  $(basename "$dolphin_pkg")"
+else
+    # ---------- GitHub release lookup ----------
+    command -v curl >/dev/null 2>&1 || die "curl is required"
+
+    if [ -n "$TAG" ]; then
+        api="${RELEASE_API_TAG}/${TAG}"
+    else
+        api="$RELEASE_API_LATEST"
+    fi
+    log "querying ${api}"
+    release_json="$(curl -fsSL "$api")" || die "could not query GitHub releases"
+
+    tag="$(printf '%s' "$release_json" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name"[^"]*"([^"]+)".*/\1/')"
+    [ -n "$tag" ] || die "no tag_name in release response"
+    ver="${tag#v}"
+    log "release: ${tag}"
+
+    case "$family" in
+        deb)
+            base_name="odrive-linux_${ver}_${arch_deb}.deb"
+            nautilus_name="odrive-linux-nautilus_${ver}_all.deb"
+            dolphin_name="odrive-linux-dolphin_${ver}_${arch_deb}.deb"
+            ;;
+        rpm)
+            # Workflow builds on fedora:41, so artifacts carry .fc41.
+            base_name="odrive-linux-${ver}-1.fc41.${arch_rpm}.rpm"
+            nautilus_name="odrive-linux-nautilus-${ver}-1.fc41.noarch.rpm"
+            dolphin_name="odrive-linux-dolphin-${ver}-1.fc41.${arch_rpm}.rpm"
+            ;;
+    esac
+
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT
+
+    download() {
+        local f="$1"
+        log "downloading ${f}"
+        run "curl -fL --progress-bar -o '$tmpdir/$f' 'https://github.com/${REPO}/releases/download/${tag}/${f}'" \
+            || die "download failed: ${f}"
+    }
+
+    download "$base_name"
+    [ "$want_nautilus" -eq 1 ] && download "$nautilus_name"
+    [ "$want_dolphin" -eq 1 ]  && download "$dolphin_name"
+
+    base_pkg="$tmpdir/$base_name"
+    nautilus_pkg="$tmpdir/$nautilus_name"
+    dolphin_pkg="$tmpdir/$dolphin_name"
+fi
 
 # ---------- install ----------
-files=("$tmpdir/$base_pkg")
-[ "$want_nautilus" -eq 1 ] && files+=("$tmpdir/$nautilus_pkg")
-[ "$want_dolphin" -eq 1 ]  && files+=("$tmpdir/$dolphin_pkg")
+files=("$base_pkg")
+[ "$want_nautilus" -eq 1 ] && [ -n "$nautilus_pkg" ] && files+=("$nautilus_pkg")
+[ "$want_dolphin" -eq 1 ]  && [ -n "$dolphin_pkg"  ] && files+=("$dolphin_pkg")
 
 case "$family" in
     deb)
