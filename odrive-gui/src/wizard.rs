@@ -311,14 +311,38 @@ fn service_page(
         let agent = agent.clone();
         let overlay = overlay.clone();
         let window = window.clone();
-        once_btn.connect_clicked(move |_| {
-            match agent.borrow().start() {
-                Ok(_) => {
-                    overlay.add_toast(Toast::new("Agent started"));
-                    push_next(&nav, &agent, &overlay, &window);
-                }
-                Err(e) => overlay.add_toast(Toast::new(&format!("Start failed: {}", e))),
-            }
+        once_btn.connect_clicked(move |btn| {
+            btn.set_sensitive(false);
+            btn.set_label("Starting…");
+            // `agent.start()` blocks ~2s polling is_running internally,
+            // so it must not run on the GTK main thread or the UI
+            // freezes. Worker pattern matches the Install button.
+            let agent_for_worker = agent.borrow().clone();
+            let nav_for_done = nav.clone();
+            let agent_for_done = agent.clone();
+            let overlay_for_done = overlay.clone();
+            let window_for_done = window.clone();
+            let btn_for_done = btn.clone();
+            worker::spawn(
+                move || agent_for_worker.start(),
+                move |result: Result<(), OdriveError>| {
+                    btn_for_done.set_sensitive(true);
+                    btn_for_done.set_label("Start once");
+                    match result {
+                        Ok(_) => {
+                            overlay_for_done.add_toast(Toast::new("Agent started"));
+                            advance_when_ready(
+                                &nav_for_done,
+                                &agent_for_done,
+                                &overlay_for_done,
+                                &window_for_done,
+                            );
+                        }
+                        Err(e) => overlay_for_done
+                            .add_toast(Toast::new(&format!("Start failed: {}", e))),
+                    }
+                },
+            );
         });
     }
 
@@ -329,15 +353,41 @@ fn service_page(
         let window = window.clone();
         auto_btn.connect_clicked(move |btn| {
             btn.set_sensitive(false);
-            let result = enable_autostart(&agent.borrow());
-            btn.set_sensitive(true);
-            match result {
-                Ok(_) => {
-                    overlay.add_toast(Toast::new("Auto-start enabled"));
-                    push_next(&nav, &agent, &overlay, &window);
-                }
-                Err(e) => overlay.add_toast(Toast::new(&format!("Auto-start failed: {}", e))),
-            }
+            btn.set_label("Enabling…");
+            // enable_autostart shells out to systemctl + loginctl; the
+            // latter may sit on a polkit prompt for enable-linger. Run
+            // it on a worker so the GTK main loop keeps painting and
+            // the polkit dialog can render. After it returns Ok we
+            // still have to wait for the agent's IPC to bind —
+            // `enable --now` returns when ExecStart launches, not when
+            // the daemon is healthy — so poll is_running briefly
+            // before advancing the wizard.
+            let agent_for_worker = agent.borrow().clone();
+            let nav_for_done = nav.clone();
+            let agent_for_done = agent.clone();
+            let overlay_for_done = overlay.clone();
+            let window_for_done = window.clone();
+            let btn_for_done = btn.clone();
+            worker::spawn(
+                move || enable_autostart(&agent_for_worker),
+                move |result: Result<(), String>| {
+                    btn_for_done.set_sensitive(true);
+                    btn_for_done.set_label("Start at login (and survive reboot)");
+                    match result {
+                        Ok(_) => {
+                            overlay_for_done.add_toast(Toast::new("Auto-start enabled"));
+                            advance_when_ready(
+                                &nav_for_done,
+                                &agent_for_done,
+                                &overlay_for_done,
+                                &window_for_done,
+                            );
+                        }
+                        Err(e) => overlay_for_done
+                            .add_toast(Toast::new(&format!("Auto-start failed: {}", e))),
+                    }
+                },
+            );
         });
     }
 
@@ -356,6 +406,48 @@ fn enable_autostart(agent: &OdriveAgent) -> Result<(), String> {
     agent.enable_systemd_unit().map_err(|e| e.to_string())?;
     agent.enable_linger().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Call `push_next` once `is_running()` returns true, polling at 500ms
+/// for up to ~10s. `systemctl --user enable --now odrive.service` and
+/// `systemctl --user start` both return as soon as ExecStart launches,
+/// but the agent itself needs another moment to bind its IPC — during
+/// that window `is_running()` (which requires both `pgrep` AND a clean
+/// `odrive status` exit) returns false. Calling `push_next` immediately
+/// races that window: push_next would re-evaluate the precondition,
+/// see `is_running` still false, and push another copy of the same
+/// Service page on top of itself, which looks indistinguishable from
+/// "nothing happened" to the user. The first poll fires at 500ms; the
+/// happy path takes 1–2 polls. After 20 ticks we surface a diagnostic
+/// toast and stop — the user can then re-click or check
+/// `systemctl --user status odrive.service` directly.
+fn advance_when_ready(
+    nav: &NavigationView,
+    agent: &Rc<RefCell<OdriveAgent>>,
+    overlay: &ToastOverlay,
+    window: &ApplicationWindow,
+) {
+    use std::cell::Cell;
+    let nav = nav.clone();
+    let agent = agent.clone();
+    let overlay = overlay.clone();
+    let window = window.clone();
+    let attempts = Rc::new(Cell::new(0u32));
+    glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+        if agent.borrow().is_running() {
+            push_next(&nav, &agent, &overlay, &window);
+            return glib::ControlFlow::Break;
+        }
+        let n = attempts.get() + 1;
+        attempts.set(n);
+        if n >= 20 {
+            overlay.add_toast(Toast::new(
+                "Agent didn't come online in time. Check `systemctl --user status odrive.service`.",
+            ));
+            return glib::ControlFlow::Break;
+        }
+        glib::ControlFlow::Continue
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -464,22 +556,30 @@ fn mount_page(
     body.set_margin_start(24);
     body.set_margin_end(24);
 
+    let default_path = agent.borrow().default_mount_path();
     let status = StatusPage::builder()
         .icon_name("folder-symbolic")
         .title("Mount your odrive root (optional)")
         .description(format!(
             "Pick a local folder to mirror your odrive cloud into. Default is {}.",
-            agent.borrow().default_mount_path(),
+            default_path,
         ))
         .build();
     body.append(&status);
 
+    let default_btn = Button::builder()
+        .label(format!("Use default ({})", default_path))
+        .halign(Align::Center)
+        .build();
+    default_btn.add_css_class("pill");
+    default_btn.add_css_class("suggested-action");
+    body.append(&default_btn);
+
     let pick_btn = Button::builder()
-        .label("Choose folder")
+        .label("Choose a different folder")
         .halign(Align::Center)
         .build();
     pick_btn.add_css_class("pill");
-    pick_btn.add_css_class("suggested-action");
     body.append(&pick_btn);
 
     let skip_btn = Button::builder()
@@ -488,6 +588,33 @@ fn mount_page(
         .build();
     skip_btn.add_css_class("pill");
     body.append(&skip_btn);
+
+    {
+        let nav = nav.clone();
+        let agent = agent.clone();
+        let overlay = overlay.clone();
+        let window = window.clone();
+        let default_path = default_path.clone();
+        default_btn.connect_clicked(move |_| {
+            // `odrive mount` creates the local dir if it's missing, but
+            // it errors before doing so when the *parent* directory
+            // doesn't exist. ~/odrive's parent is $HOME which is a
+            // given, so a bare mount call is safe; create_dir_all is a
+            // belt-and-braces guard for users who customised
+            // `default_mount_path` to something deeper.
+            if let Err(e) = std::fs::create_dir_all(&default_path) {
+                overlay.add_toast(Toast::new(&format!("Could not create {}: {}", default_path, e)));
+                return;
+            }
+            match agent.borrow().mount(&default_path, "/") {
+                Ok(_) => {
+                    overlay.add_toast(Toast::new("Mount created"));
+                    push_next(&nav, &agent, &overlay, &window);
+                }
+                Err(e) => overlay.add_toast(Toast::new(&format!("Mount failed: {}", e))),
+            }
+        });
+    }
 
     {
         let nav = nav.clone();
