@@ -42,7 +42,7 @@ jobs:
           echo "${HOME}/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Build .deb packages
         run: |
@@ -57,7 +57,7 @@ jobs:
           ls -la dist/
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: deb-packages
           path: dist/*.deb
@@ -87,7 +87,7 @@ jobs:
           echo "${HOME}/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Resolve version
         id: ver
@@ -101,6 +101,11 @@ jobs:
       - name: Stage source tarball
         run: |
           ver="${{ steps.ver.outputs.version }}"
+          # actions/checkout runs as a different uid than the container's
+          # default user; without this `git archive` aborts with `fatal:
+          # detected dubious ownership in repository at …`. Whitelisting
+          # the workspace as a safe directory restores normal git access.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           mkdir -p ~/rpmbuild/{SOURCES,SPECS,BUILD,RPMS,SRPMS}
           # %autosetup expects the tarball to extract to <name>-<version>/.
           git archive --format=tar --prefix="odrive-linux-${ver}/" HEAD | \
@@ -118,7 +123,7 @@ jobs:
           ls -la dist/
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: rpm-packages
           path: dist/*.rpm
@@ -129,13 +134,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download .deb artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: deb-packages
           path: dist
 
       - name: Download .rpm artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: rpm-packages
           path: dist
