@@ -158,12 +158,23 @@ sweep_user_shadows() {
     for f in \
         "$user_data/applications/io.github.keithvassallomt.odrive-linux.desktop" \
         "$user_data/applications/odrive-linux-open.desktop" \
-        "$user_data/mime/packages/odrive-linux.xml"; do
-        if [ -e "$f" ]; then
+        "$user_data/mime/packages/odrive-linux.xml" \
+        "$user_data/nautilus-python/extensions/odrive_extension.py" \
+        "$user_data/nautilus-python/extensions/nautilus_extension.py" \
+        "$user_data/nautilus-python/extensions/odrive-linux.py"; do
+        if [ -e "$f" ] || [ -L "$f" ]; then
             run "rm -f '$f'"
             removed=$((removed + 1))
         fi
     done
+
+    # Dev workflow leaves a stale __pycache__ alongside the .py file.
+    # Without sweeping it, the pre-compiled .pyc keeps Nautilus loading
+    # the old extension on its next start even though the .py is gone.
+    if [ -d "$user_data/nautilus-python/extensions/__pycache__" ]; then
+        run "rm -rf '$user_data/nautilus-python/extensions/__pycache__'"
+        removed=$((removed + 1))
+    fi
 
     # Sweep our installed icon names from every size bucket.
     if [ -d "$user_data/icons/hicolor" ]; then
