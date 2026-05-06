@@ -20,16 +20,26 @@ use adw::prelude::*;
 use adw::gtk as gtk;
 use adw::{
     ApplicationWindow, EntryRow, HeaderBar, NavigationPage, NavigationView,
-    PreferencesGroup, StatusPage, ToastOverlay, ToolbarView,
+    PreferencesGroup, ToastOverlay, ToolbarView,
 };
 use gtk::{
-    gio, glib, Align, Application, Box as GtkBox, Button, FileDialog, Orientation,
+    gio, glib, Align, Application, Box as GtkBox, Button, FileDialog, Image, Justification,
+    Label, Orientation,
 };
 use crate::toasts::{error_toast, toast};
 
 /// Mascot icon name resolved against hicolor; the same illustration the
 /// About dialog uses. Single visual identity across every wizard page.
 const WIZARD_ICON: &str = "odrive-linux-mascot";
+
+/// Hero icon size for the wizard pages. Adw.StatusPage's CSS pins the
+/// icon at 128 px and dims it via `color-mix(currentColor, transparent)`,
+/// which works fine for symbolic glyphs but renders our full-colour
+/// raster mascot smaller than intended (the dim layer plus the shared
+/// 128-px slot for both compact and hero modes makes the illustration
+/// read as an accent badge rather than the page art). Building the
+/// hero column directly with explicit `set_pixel_size` sidesteps both.
+const WIZARD_ICON_SIZE: i32 = 192;
 
 /// Pixel width every wizard action button gets via `set_size_request`.
 /// 280 reads as comfortable for the longest label ("Start at login (and
@@ -53,6 +63,49 @@ fn action_button(label: &str, suggested: bool) -> Button {
     }
     btn
 }
+
+/// Compose the hero column for a wizard page: large mascot + bold title
+/// + dimmed description + caller-supplied actions, vertically centred.
+/// Replaces Adw.StatusPage for the wizard because StatusPage's bundled
+/// CSS dims the icon and ties title styling to a deep descendant
+/// selector that's brittle when the page contains a custom child layout.
+/// Hand-built with `Image::set_pixel_size` for the icon and the
+/// public `.title-1` / `.body` / `.dim-label` Adw style classes for the
+/// labels, giving us crisp hero typography with no mystery scaling.
+fn hero_page(title_text: &str, description_text: &str, actions: &GtkBox) -> GtkBox {
+    let column = GtkBox::new(Orientation::Vertical, 12);
+    column.set_halign(Align::Center);
+    column.set_valign(Align::Center);
+    column.set_margin_top(36);
+    column.set_margin_bottom(36);
+    column.set_margin_start(36);
+    column.set_margin_end(36);
+
+    let icon = Image::from_icon_name(WIZARD_ICON);
+    icon.set_pixel_size(WIZARD_ICON_SIZE);
+    icon.set_margin_bottom(12);
+    column.append(&icon);
+
+    let title = Label::new(Some(title_text));
+    title.add_css_class("title-1");
+    title.set_wrap(true);
+    title.set_justify(Justification::Center);
+    title.set_max_width_chars(40);
+    column.append(&title);
+
+    let description = Label::new(Some(description_text));
+    description.add_css_class("body");
+    description.add_css_class("dim-label");
+    description.set_wrap(true);
+    description.set_justify(Justification::Center);
+    description.set_max_width_chars(50);
+    description.set_margin_bottom(12);
+    column.append(&description);
+
+    column.append(actions);
+    column
+}
+
 use crate::worker;
 use odrive_core::{OdriveAgent, OdriveConfig, OdriveError};
 use std::cell::RefCell;
@@ -174,15 +227,14 @@ fn install_page(
     actions.append(&pick_btn);
     actions.append(&install_btn);
 
-    let status = StatusPage::builder()
-        .icon_name(WIZARD_ICON)
-        .title("Install odrive")
-        .description(format!(
+    let body = hero_page(
+        "Install odrive",
+        &format!(
             "Couldn't find odrive at {}. Either point us at an existing install, or let us run the official installer.",
             agent.borrow().agent_bin_dir(),
-        ))
-        .child(&actions)
-        .build();
+        ),
+        &actions,
+    );
 
     {
         let nav = nav.clone();
@@ -232,7 +284,7 @@ fn install_page(
 
     NavigationPage::builder()
         .title("Install")
-        .child(&status)
+        .child(&body)
         .can_pop(false)
         .build()
 }
@@ -309,12 +361,11 @@ fn service_page(
     actions.append(&once_btn);
     actions.append(&auto_btn);
 
-    let status = StatusPage::builder()
-        .icon_name(WIZARD_ICON)
-        .title("Start the agent")
-        .description("odriveagent isn't running. How do you want to start it?")
-        .child(&actions)
-        .build();
+    let body = hero_page(
+        "Start the agent",
+        "odriveagent isn't running. How do you want to start it?",
+        &actions,
+    );
 
     {
         let nav = nav.clone();
@@ -403,7 +454,7 @@ fn service_page(
 
     NavigationPage::builder()
         .title("Service")
-        .child(&status)
+        .child(&body)
         .can_pop(false)
         .build()
 }
@@ -491,14 +542,11 @@ fn login_page(
     actions.append(&entry_group);
     actions.append(&submit_btn);
 
-    let status = StatusPage::builder()
-        .icon_name(WIZARD_ICON)
-        .title("Sign in to odrive")
-        .description(
-            "Get an authentication code from your odrive account, then paste it below.",
-        )
-        .child(&actions)
-        .build();
+    let body = hero_page(
+        "Sign in to odrive",
+        "Get an authentication code from your odrive account, then paste it below.",
+        &actions,
+    );
 
     {
         let overlay = overlay.clone();
@@ -542,7 +590,7 @@ fn login_page(
 
     NavigationPage::builder()
         .title("Sign in")
-        .child(&status)
+        .child(&body)
         .can_pop(false)
         .build()
 }
@@ -569,15 +617,14 @@ fn mount_page(
     actions.append(&pick_btn);
     actions.append(&skip_btn);
 
-    let status = StatusPage::builder()
-        .icon_name(WIZARD_ICON)
-        .title("Mount your odrive root (optional)")
-        .description(format!(
+    let body = hero_page(
+        "Mount your odrive root (optional)",
+        &format!(
             "Pick a local folder to mirror your odrive cloud into. Default is {}.",
             default_path,
-        ))
-        .child(&actions)
-        .build();
+        ),
+        &actions,
+    );
 
     {
         let nav = nav.clone();
@@ -628,7 +675,7 @@ fn mount_page(
 
     NavigationPage::builder()
         .title("Mount")
-        .child(&status)
+        .child(&body)
         .can_pop(false)
         .build()
 }
