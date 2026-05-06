@@ -978,13 +978,32 @@ fn primary_menu(
             Box::new(move || {
                 let about = adw::AboutWindow::builder()
                     .application_name("odrive Manager")
-                    .application_icon("folder-remote-symbolic")
+                    .application_icon("odrive-linux-mascot")
                     .version(env!("CARGO_PKG_VERSION"))
-                    .developer_name("odrive-linux contributors")
-                    .website("https://www.odrive.com")
-                    .license_type(gtk::License::MitX11)
+                    .developer_name("Keith Vassallo and contributors")
+                    .website("https://github.com/keithvassallomt/odrive-linux")
+                    .issue_url("https://github.com/keithvassallomt/odrive-linux/issues")
+                    .license_type(gtk::License::Agpl30)
+                    .copyright("© 2026 Keith Vassallo and contributors")
                     .modal(true)
                     .build();
+                // The "Visit odrive.com" link surfaces in the About
+                // window's Details section as a clickable row.
+                about.add_link("Visit odrive.com", "https://www.odrive.com");
+                // Disclaimer lives in its own Legal section so it sits
+                // separate from the project copyright and the AGPL-3.0
+                // license text Adw renders automatically.
+                about.add_legal_section(
+                    "Disclaimer",
+                    None,
+                    gtk::License::Custom,
+                    Some(
+                        "odrive-linux is an unofficial Linux frontend. \
+                         This project is not affiliated with, endorsed by, \
+                         or sponsored by Oxygen Cloud, Inc. or their odrive \
+                         product. \"odrive\" is a trademark of Oxygen Cloud, Inc.",
+                    ),
+                );
                 if let Some(root) = overlay
                     .root()
                     .and_then(|r| r.downcast::<gtk::Window>().ok())

@@ -500,6 +500,14 @@ const APP_MENU_ICON: &str = "odrive-menu";
 const APP_LAUNCHER_ICON: &str = "io.github.keithvassallomt.odrive-linux";
 const APP_DESKTOP_NAME: &str = "io.github.keithvassallomt.odrive-linux.desktop";
 
+/// Icon name for the mascot illustration shown in the GUI's About
+/// dialog. Single bundled source PNG (`odrive-icons/odrive-linux-mascot.png`)
+/// is non-square (1536×1024) so we don't try to feed it to the standard
+/// install_icon_set / hicolor sized-bucket pipeline; `install_mascot_icon`
+/// drops it once at `1024x1024/apps/<name>.png` and lets GTK's icon
+/// loader scale it at render time.
+const MASCOT_ICON_NAME: &str = "odrive-linux-mascot";
+
 /// Cloud-file-type sub-MIMEs. Each entry: (icons subdir, mime/icon stem,
 /// glob patterns). The MIME stems become `application/vnd.odrive.<stem>-cloud`
 /// (e.g. `gdoc-cloud`); icons under `~/.local/share/icons/hicolor/<size>/mimetypes/`
@@ -806,6 +814,30 @@ fn install_placeholder_icon(
     Ok(count)
 }
 
+/// Install the mascot illustration shown in the GUI's About dialog.
+/// Single bundled source PNG, non-square (1536×1024). Lands at
+/// `<hicolor>/1024x1024/apps/<MASCOT_ICON_NAME>.png` so a plain
+/// `Adw.AboutWindow::application_icon(MASCOT_ICON_NAME)` call resolves
+/// it; GTK loads PNGs by file path and scales at render time, so the
+/// directory bucket name vs. actual pixel size mismatch is harmless
+/// (and covered by the existing icon-size lintian override).
+///
+/// Returns the count of files copied. Missing source PNG yields `Ok(0)`
+/// — defensive shape matching the other icon installers.
+fn install_mascot_icon(
+    icons_dir: &std::path::Path,
+    hicolor: &str,
+) -> std::io::Result<usize> {
+    let src = icons_dir.join("odrive-linux-mascot.png");
+    if !src.is_file() {
+        return Ok(0);
+    }
+    let dst_dir = format!("{}/1024x1024/apps", hicolor);
+    std::fs::create_dir_all(&dst_dir)?;
+    std::fs::copy(&src, format!("{}/{}.png", dst_dir, MASCOT_ICON_NAME))?;
+    Ok(1)
+}
+
 /// Parse a size from a dash-separated filename stem like `cloud-file-512x512` → 512.
 /// The asset bundle uses this shape for `mime_icons/cloud-file/` and
 /// `mime_icons/cloud-folder/` (alongside byte-identical `@2x` duplicates the
@@ -1096,6 +1128,7 @@ fn install_handlers() -> Result<(), Box<dyn std::error::Error>> {
             "apps",
             APP_LAUNCHER_ICON,
         )?;
+        icon_files += install_mascot_icon(&icons_dir, &hicolor)?;
         let _ = std::process::Command::new("gtk-update-icon-cache")
             .args(["-f", "-t"])
             .arg(&hicolor)
@@ -1198,6 +1231,7 @@ fn uninstall_handlers() -> Result<(), Box<dyn std::error::Error>> {
     let apps_targets: Vec<String> = vec![
         APP_MENU_ICON.to_string(),
         APP_LAUNCHER_ICON.to_string(),
+        MASCOT_ICON_NAME.to_string(),
     ];
     let mut removed_icons = 0usize;
     if let Ok(entries) = std::fs::read_dir(&hicolor) {
@@ -1343,6 +1377,7 @@ fn prepare_payload(dst: &str, prefix: &str) -> Result<(), Box<dyn std::error::Er
     icon_files += install_placeholder_icon(&icons_dir, &hicolor, "cloud-folder", PLACEHOLDER_FOLDER_ICON)?;
     icon_files += install_icon_set(&icons_dir.join("app-icon"), &hicolor, "apps", APP_MENU_ICON)?;
     icon_files += install_icon_set(&icons_dir.join("app-icon"), &hicolor, "apps", APP_LAUNCHER_ICON)?;
+    icon_files += install_mascot_icon(&icons_dir, &hicolor)?;
 
     let mime_path = format!("{}/{}", mime_dir, MIME_XML_NAME);
     std::fs::write(&mime_path, build_mime_xml())?;
