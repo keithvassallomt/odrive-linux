@@ -12,9 +12,9 @@ use libadwaita as adw;
 use adw::prelude::*;
 use adw::gtk as gtk;
 use adw::{
-    ActionRow, ApplicationWindow, HeaderBar, MessageDialog, NavigationPage,
+    ActionRow, ApplicationWindow, EntryRow, HeaderBar, MessageDialog, NavigationPage,
     NavigationView, PreferencesGroup, PreferencesPage, ResponseAppearance,
-    StatusPage, Toast, ToastOverlay, ToolbarView,
+    StatusPage, Toast, ToastOverlay, ToolbarView, Window,
 };
 use gtk::{gdk, gio, Application, Button, CssProvider, MenuButton};
 use odrive_core::{FolderRule, FolderSyncThreshold, OdriveAgent, OdriveDb};
@@ -256,6 +256,21 @@ fn build_mount_sync_page(
         .title("Mounts")
         .description("Local folders mirrored from your odrive cloud account.")
         .build();
+    let add_mount_btn = Button::builder()
+        .icon_name("list-add-symbolic")
+        .tooltip_text("Add a new mount")
+        .css_classes(["flat"])
+        .valign(gtk::Align::Center)
+        .build();
+    {
+        let agent = agent.clone();
+        let overlay = overlay.clone();
+        let add_mount_btn_for_cb = add_mount_btn.clone();
+        add_mount_btn.connect_clicked(move |_| {
+            present_add_mount_dialog(agent.clone(), overlay.clone(), &add_mount_btn_for_cb);
+        });
+    }
+    mounts_group.set_header_suffix(Some(&add_mount_btn));
     page.add(&mounts_group);
 
     // Sync Rules: every per-folder rule the user has set via the
@@ -736,6 +751,175 @@ fn confirm_and_unmount(
         dlg.close();
     });
     dialog.present();
+}
+
+/// "Add mount" — modal Adw.Window with HeaderBar (Cancel left, Save
+/// right) and a PreferencesPage hosting the local-folder picker and
+/// remote-path entry. Mirrors the Add Backup dialog's structure for
+/// visual consistency.
+///
+/// The agent enforces the genuine footguns itself
+/// (`AgentProSyncFolderController._check_valid_local_folder_location`):
+/// already-mounted local path, nested local mount in either direction,
+/// filesystem root. We don't pre-validate; we surface upstream errors
+/// as toasts. Crucially the agent does NOT reject same-remote /
+/// different-local: mounting a sub-tree of an already-mounted remote
+/// to a separate local path is permitted (and sometimes useful).
+fn present_add_mount_dialog(
+    agent: Rc<OdriveAgent>,
+    overlay: ToastOverlay,
+    anchor: &Button,
+) {
+    let parent = anchor
+        .root()
+        .and_then(|r| r.downcast::<gtk::Window>().ok());
+
+    let win = Window::builder()
+        .title("Add mount")
+        .modal(true)
+        .default_width(520)
+        .default_height(380)
+        .build();
+    if let Some(p) = parent.as_ref() {
+        win.set_transient_for(Some(p));
+    }
+
+    let header = HeaderBar::new();
+    let cancel_btn = Button::builder().label("Cancel").build();
+    let save_btn = Button::builder()
+        .label("Save")
+        .css_classes(["suggested-action"])
+        .sensitive(false)
+        .build();
+    header.pack_start(&cancel_btn);
+    header.pack_end(&save_btn);
+
+    let toolbar = ToolbarView::new();
+    toolbar.add_top_bar(&header);
+
+    let page = PreferencesPage::new();
+    page.set_margin_top(6);
+
+    let local_group = PreferencesGroup::builder()
+        .title("Local folder")
+        .description(
+            "The local directory the remote content should appear in. \
+             It can't be inside or contain an existing mount.",
+        )
+        .build();
+    let local_row = ActionRow::builder()
+        .title("Folder")
+        .subtitle("(none chosen)")
+        .build();
+    let local_pick_btn = Button::builder()
+        .label("Choose folder…")
+        .valign(gtk::Align::Center)
+        .build();
+    local_row.add_suffix(&local_pick_btn);
+    local_group.add(&local_row);
+    page.add(&local_group);
+
+    let remote_group = PreferencesGroup::builder()
+        .title("Remote path")
+        .description(
+            "Path inside your odrive cloud account. Use `/` for the entire \
+             account, or a subpath like `/Google Drive/Work`.",
+        )
+        .build();
+    let remote_row = EntryRow::builder().title("Path").build();
+    let open_web_btn = Button::builder()
+        .icon_name("web-browser-symbolic")
+        .tooltip_text("Open the odrive web manager so you can copy a remote path.")
+        .css_classes(["flat"])
+        .valign(gtk::Align::Center)
+        .build();
+    open_web_btn.connect_clicked(|_| {
+        let _ = gtk::glib::spawn_command_line_async(
+            "xdg-open https://www.odrive.com/account/myodrive",
+        );
+    });
+    remote_row.add_suffix(&open_web_btn);
+    remote_group.add(&remote_row);
+    page.add(&remote_group);
+
+    toolbar.set_content(Some(&page));
+    win.set_content(Some(&toolbar));
+
+    let local_path: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+
+    {
+        let win_for_pick = win.clone();
+        let local_row_for_pick = local_row.clone();
+        let local_path_for_pick = local_path.clone();
+        let remote_row_for_pick = remote_row.clone();
+        let save_btn_for_pick = save_btn.clone();
+        local_pick_btn.connect_clicked(move |_| {
+            let local_row_inner = local_row_for_pick.clone();
+            let local_path_w = local_path_for_pick.clone();
+            let remote_row_w = remote_row_for_pick.clone();
+            let save_btn_w = save_btn_for_pick.clone();
+            let file_dialog = gtk::FileDialog::builder()
+                .title("Choose mount location")
+                .modal(true)
+                .build();
+            let cancellable: Option<&gio::Cancellable> = None;
+            file_dialog.select_folder(Some(&win_for_pick), cancellable, move |result| {
+                if let Ok(folder) = result {
+                    if let Some(p) = folder.path() {
+                        let p_str = p.to_string_lossy().into_owned();
+                        local_row_inner.set_subtitle(&p_str);
+                        *local_path_w.borrow_mut() = Some(p_str);
+                        save_btn_w.set_sensitive(!remote_row_w.text().is_empty());
+                    }
+                }
+            });
+        });
+    }
+
+    {
+        let local_path_for_remote = local_path.clone();
+        let save_btn_for_remote = save_btn.clone();
+        remote_row.connect_changed(move |entry| {
+            let local_set = local_path_for_remote.borrow().is_some();
+            let remote_set = !entry.text().is_empty();
+            save_btn_for_remote.set_sensitive(local_set && remote_set);
+        });
+    }
+
+    {
+        let win_for_cancel = win.clone();
+        cancel_btn.connect_clicked(move |_| {
+            win_for_cancel.close();
+        });
+    }
+
+    {
+        let agent_for_save = agent.clone();
+        let overlay_for_save = overlay.clone();
+        let local_path_for_save = local_path.clone();
+        let remote_row_for_save = remote_row.clone();
+        let win_for_save = win.clone();
+        save_btn.connect_clicked(move |_| {
+            let local = local_path_for_save.borrow().clone();
+            let remote = remote_row_for_save.text().to_string();
+            let trimmed = remote.trim().to_string();
+            if let (Some(local), false) = (local, trimmed.is_empty()) {
+                match agent_for_save.mount(&local, &trimmed) {
+                    Ok(_) => {
+                        overlay_for_save.add_toast(Toast::new("Mount added"));
+                        win_for_save.close();
+                    }
+                    Err(e) => {
+                        // Don't close — let the user fix and retry.
+                        overlay_for_save
+                            .add_toast(Toast::new(&format!("Couldn't add mount: {}", e)));
+                    }
+                }
+            }
+        });
+    }
+
+    win.present();
 }
 
 /// Build the primary menu model and the action callbacks that back its

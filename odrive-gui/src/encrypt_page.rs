@@ -49,7 +49,7 @@ use libadwaita as adw;
 use odrive_core::OdriveAgent;
 use std::rc::Rc;
 
-const MANAGE_URL: &str = "https://www.odrive.com/account/myodrive?catid=encryption";
+const MANAGE_URL: &str = "https://www.odrive.com/account/myodrive";
 
 pub fn build_encrypt_page(agent: Rc<OdriveAgent>, overlay: ToastOverlay) -> PreferencesPage {
     let page = PreferencesPage::new();
