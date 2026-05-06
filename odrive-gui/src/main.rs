@@ -176,6 +176,11 @@ fn build_dashboard_page(
     let toolbar = ToolbarView::new();
 
     let header = HeaderBar::new();
+    // Drop the maximize button — the dashboard is sized for a fixed-ish
+    // 820×520 layout and going fullscreen just leaves a sea of dead
+    // space. Minimize and close stay; users can still drag-resize the
+    // edges if they want a wider window.
+    header.set_decoration_layout(Some(":minimize,close"));
 
     // Primary menu (hamburger) on the right — current GNOME idiom for
     // app-level commands. Houses Preferences and About.

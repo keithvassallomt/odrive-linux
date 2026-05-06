@@ -57,35 +57,40 @@ pub fn build_trash_page(agent: Rc<OdriveAgent>, overlay: ToastOverlay) -> Prefer
     let page = PreferencesPage::new();
     page.set_margin_top(12);
 
-    let group = PreferencesGroup::builder()
+    // Page-level action bar: a single ActionRow inside a header-less
+    // PreferencesGroup, with the buttons as suffix widgets. This gives
+    // them a normal ListBoxRow vertical extent (~40 px) instead of
+    // letting them inherit the group-header height the way
+    // `set_header_suffix` does — that path produced absurdly tall
+    // buttons whenever the group description wrapped to multiple lines.
+    let actions_group = PreferencesGroup::new();
+    let actions_row = ActionRow::builder()
         .title("Trash")
-        .description(
-            "Items the agent moved to trash because they were deleted locally. \
-             Use Restore to bring them back as placeholders, or Empty Trash to \
-             permanently remove them from cloud storage.",
-        )
-        .build();
-
-    // Header-suffix actions: "Restore All" + "Empty Trash". Mirrors
-    // the pattern other PreferencesGroups use for group-level actions
-    // (small button row in the header rather than a separate toolbar).
-    let header_box = adw::gtk::Box::builder()
-        .orientation(adw::gtk::Orientation::Horizontal)
-        .spacing(6)
+        .subtitle("Items removed locally that the agent has trashed.")
         .build();
     let restore_all_btn = adw::gtk::Button::builder()
         .label("Restore All")
         .tooltip_text("Restore every item in the trash as a placeholder")
+        .valign(adw::gtk::Align::Center)
         .build();
     let empty_btn = adw::gtk::Button::builder()
         .label("Empty Trash")
         .tooltip_text("Permanently delete every item in the trash")
         .css_classes(["destructive-action"])
+        .valign(adw::gtk::Align::Center)
         .build();
-    header_box.append(&restore_all_btn);
-    header_box.append(&empty_btn);
-    group.set_header_suffix(Some(&header_box));
+    let suffix_box = adw::gtk::Box::builder()
+        .orientation(adw::gtk::Orientation::Horizontal)
+        .spacing(8)
+        .valign(adw::gtk::Align::Center)
+        .build();
+    suffix_box.append(&restore_all_btn);
+    suffix_box.append(&empty_btn);
+    actions_row.add_suffix(&suffix_box);
+    actions_group.add(&actions_row);
+    page.add(&actions_group);
 
+    let group = PreferencesGroup::new();
     page.add(&group);
 
     // Track ActionRows so each tick can swap them rather than rebuilding
@@ -364,15 +369,12 @@ fn confirm_and_restore_one(
 
     let body = if need_workaround {
         format!(
-            "{} will be brought back as a placeholder. \n\n\
-             The agent's IPC has no per-item restore, so the Manager \
-             restores the entire trash and then re-deletes the other \
-             items locally. They will reappear in trash on the agent's \
-             next periodic local scan (typically within 30 minutes).",
-            basename
+            "{basename} comes back as a placeholder. The other trashed \
+             items briefly disappear from the trash list and reappear \
+             on the agent's next local scan (within ~30 min)."
         )
     } else {
-        format!("{} will be brought back as a placeholder.", basename)
+        format!("{basename} comes back as a placeholder.")
     };
 
     let dialog = MessageDialog::builder()
