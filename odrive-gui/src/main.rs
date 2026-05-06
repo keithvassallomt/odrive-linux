@@ -980,7 +980,7 @@ fn primary_menu(
                     .application_name("odrive Manager")
                     .application_icon("odrive-linux-mascot")
                     .version(env!("CARGO_PKG_VERSION"))
-                    .developer_name("Keith Vassallo and contributors")
+                    .developer_name("Keith Vassallo")
                     .website("https://github.com/keithvassallomt/odrive-linux")
                     .issue_url("https://github.com/keithvassallomt/odrive-linux/issues")
                     .license_type(gtk::License::Agpl30)
