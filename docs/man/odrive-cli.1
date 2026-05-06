@@ -1,0 +1,221 @@
+.\" Manpage for odrive-cli.
+.\" Source: https://github.com/keithvassallomt/odrive-linux
+.TH ODRIVE-CLI 1 "May 2026" "odrive-linux" "User Commands"
+.SH NAME
+odrive-cli \- command-line wrapper for the odrive on-demand cloud sync agent
+.SH SYNOPSIS
+.B odrive-cli
+[\fIcommand\fR] [\fIarguments\fR...]
+.SH DESCRIPTION
+.B odrive-cli
+is the Rust front-end of the odrive-linux Manager. It wraps every CLI
+subcommand the Manager uses and exposes a few extras for desktop
+integration: composing share URLs, opening placeholder MIME handlers,
+and laying down the icon / MIME / .desktop registrations.
+
+It does not talk to odrive's cloud directly. Every operation shells
+out to the user's installed
+.B odrive
+binary (typically at
+.IR ~/.odrive-agent/bin/odrive ).
+The agent
+.RB ( odriveagent )
+must already be running for state-changing commands to succeed; use
+.B odrive-cli start
+or rely on the systemd-user unit the Manager's onboarding wizard
+installs.
+
+If
+.B odrive-cli
+is invoked with no command, it prints the agent status (equivalent to
+.BR "odrive-cli status" ).
+.SH COMMANDS
+.TP
+.B status
+Print agent status plus the count of placeholders the Manager has
+indexed in its local SQLite database.
+.TP
+\fBmounts\fR [\fB--paths\fR]
+List active mounts. With
+.BR --paths ,
+prints only the local mount paths, one per line, for use in scripts.
+.TP
+.B start
+Start the odrive agent. Tries
+.B systemctl --user start odrive.service
+first, falling back to
+.B nohup odriveagent
+if the unit isn't available.
+.TP
+.B stop
+Stop the odrive agent.
+.TP
+\fBsync\fR \fIPATH\fR
+Sync the file or folder at \fIPATH\fR. For a
+.B *.cloud
+placeholder this materialises the file; for a
+.B *.cloudf
+placeholder it expands the folder one level.
+.TP
+\fBunsync\fR \fIPATH\fR
+Revert a materialised file or folder back to a
+.B *.cloud
+/
+.B *.cloudf
+placeholder, freeing local disk.
+.TP
+\fBrefresh\fR \fIPATH\fR
+Re-check the remote for changes to the folder at \fIPATH\fR.
+.TP
+\fBsharelink\fR \fIPATH\fR
+Generate a fresh share URL for the item at \fIPATH\fR and print it on
+stdout. Each invocation creates a new URL — there is no upstream
+"fetch existing link" form.
+.TP
+\fBcopy-share-link\fR \fIPATH\fR [\fIPATH\fR...]
+Generate share URLs for one or more paths and write them
+(newline-joined) to the system clipboard. Used by the Dolphin
+"Copy Share Link" service-menu action. On Wayland the command shells
+out to
+.BR wl-copy ;
+on X11 it falls back to
+.BR xclip .
+.TP
+\fBweburl\fR \fIPATH\fR
+Compose the odrive web-app URL for a local path and print it on
+stdout.
+.TP
+\fBopen-web-preview\fR \fIPATH\fR
+Compose the odrive web-app URL for a path and open it in the user's
+default browser via
+.BR xdg-open .
+.TP
+\fBscan\fR [\fIPATH\fR]
+Scan a mount for
+.B *.cloud
+/
+.B *.cloudf
+placeholders and update the Manager's local SQLite index. Defaults to
+.IR ~/odrive .
+.TP
+\fBopen\fR \fIPATH\fR
+Materialise the placeholder at \fIPATH\fR (if it isn't already), then
+open the result with
+.BR xdg-open .
+This is the command bound as the
+.B Exec=
+target of the
+.B *.cloud
+/
+.B *.cloudf
+MIME handler installed by
+.BR install-handlers ;
+double-clicking a placeholder in any file manager runs it.
+.TP
+.B install-handlers
+Register MIME types for
+.B *.cloud
+/
+.B *.cloudf
+and set
+.B odrive-cli
+as the default handler. Writes to
+.I ~/.local/share/{mime,applications,icons,nautilus-python}
+and refreshes the relevant caches. Reversible via
+.BR uninstall-handlers .
+This is the development-time install path; users who installed via
+.B .deb
+or
+.B .rpm
+get the same registrations system-wide, written by the package's
+post-install hook.
+.TP
+.B uninstall-handlers
+Remove every MIME / desktop / icon entry written by
+.BR install-handlers ,
+plus the GVFS custom-icon metadata it added to existing mounts.
+Per-user, idempotent.
+.TP
+\fBprepare-payload\fR \fIDST\fR [\fB--prefix\fR \fIPREFIX\fR]
+Materialise the static package payload (icons in hicolor layout, MIME
+XML, .desktop files with system paths, Nautilus extension, manpages)
+under
+.IB DST PREFIX /share/...
+for the
+.B .deb
+/
+.B .rpm
+build pipelines. The default
+.I PREFIX
+is
+.IR /usr .
+Not for end users; idempotent.
+.TP
+.B setup
+Per-user finalisation step a packaged install can't perform from
+.BR postinst :
+pad zero-byte placeholders so GLib's content-type guessing resolves
+their MIME, apply the mount-folder icon to existing mounts, and set
+the packaged opener as the
+.B xdg-mime
+default for placeholder MIMEs in
+.IR ~/.config/mimeapps.list .
+Run once after your first GUI mount; idempotent.
+.SH FILES
+.TP
+.I ~/.odrive-agent/bin/
+Default location for the upstream
+.B odrive
+and
+.B odriveagent
+binaries.
+.TP
+.I ~/.odrive-linux.db
+SQLite database the Manager and CLI share for placeholder tracking,
+folder sync rules, and in-flight sync state.
+.TP
+.I ~/.config/odrive-linux/config.toml
+User configuration: agent binary directory, tray-icon colour, Nautilus
+emblem preferences.
+.TP
+.I ~/.config/systemd/user/odrive.service
+Systemd-user unit installed by the Manager's onboarding wizard so
+.B odriveagent
+starts on login.
+.TP
+.I ~/.odrive-agent/log/main.log
+Upstream agent log. View live via the Manager's Preferences → Status
+page.
+.SH ENVIRONMENT
+.TP
+.B ODRIVE_CLI
+If set, certain helpers (the Nautilus extension, Dolphin plugins) use
+this path to locate
+.BR odrive-cli .
+Otherwise they search
+.BR PATH ,
+then fall back to
+.B target/release/odrive-cli
+relative to themselves.
+.SH SEE ALSO
+.BR odrive-gui (1),
+.BR odrive (1),
+.BR systemctl (1)
+.PP
+Project home:
+.UR https://github.com/keithvassallomt/odrive-linux
+.UE
+.SH BUGS
+Report bugs at
+.UR https://github.com/keithvassallomt/odrive-linux/issues
+.UE .
+.SH AUTHOR
+Keith Vassallo and contributors.
+.SH COPYRIGHT
+Copyright \(co 2026 Keith Vassallo. Distributed under the terms of the
+GNU Affero General Public License version 3 or later.
+.SH DISCLAIMER
+.B odrive-linux
+is an unofficial Linux frontend. This project is not affiliated with
+Oxygen Cloud, Inc. or their odrive product. "odrive" is a registered
+trademark of Oxygen Cloud, Inc.

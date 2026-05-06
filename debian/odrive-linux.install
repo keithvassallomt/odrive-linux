@@ -3,3 +3,5 @@ usr/bin/odrive-gui
 usr/share/icons
 usr/share/mime
 usr/share/applications
+usr/share/man/man1/odrive-cli.1
+usr/share/man/man1/odrive-gui.1

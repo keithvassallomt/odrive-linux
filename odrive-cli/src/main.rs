@@ -1320,6 +1320,25 @@ fn find_nautilus_extension() -> Option<std::path::PathBuf> {
     None
 }
 
+/// Walk up from the running binary looking for `docs/man/`. Same
+/// workspace-relative shape as the icon and Nautilus-extension
+/// finders. Returns `None` if the directory isn't found —
+/// `prepare_payload` then skips manpage staging and the .deb / .rpm
+/// builds get a `no-manual-page` lintian / rpmlint warning instead
+/// of failing.
+fn find_man_dir() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let mut cur = exe.as_path();
+    while let Some(parent) = cur.parent() {
+        let candidate = parent.join("docs").join("man");
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+        cur = parent;
+    }
+    None
+}
+
 /// Materialise the static package payload (icons under hicolor/, MIME
 /// XML, .desktop files with system-stable Exec paths, the Nautilus
 /// Python extension) under `<dst><prefix>/share/...`. Reuses the same
@@ -1349,10 +1368,12 @@ fn prepare_payload(dst: &str, prefix: &str) -> Result<(), Box<dyn std::error::Er
     let mime_dir = format!("{}/mime/packages", share_root);
     let app_dir = format!("{}/applications", share_root);
     let nautilus_dir = format!("{}/nautilus-python/extensions", share_root);
+    let man_dir = format!("{}/man/man1", share_root);
 
     std::fs::create_dir_all(&mime_dir)?;
     std::fs::create_dir_all(&app_dir)?;
     std::fs::create_dir_all(&nautilus_dir)?;
+    std::fs::create_dir_all(&man_dir)?;
 
     let mut icon_files = 0usize;
     for (subdir, name) in EMBLEMS {
@@ -1431,6 +1452,19 @@ fn prepare_payload(dst: &str, prefix: &str) -> Result<(), Box<dyn std::error::Er
         None
     };
 
+    // Manpages: section-1 sources live under docs/man/. debhelper +
+    // rpmbuild auto-gzip on package time, so we drop them in plain.
+    let mut man_count = 0usize;
+    if let Some(src_dir) = find_man_dir() {
+        for name in ["odrive-cli.1", "odrive-gui.1"] {
+            let src = src_dir.join(name);
+            if src.is_file() {
+                std::fs::copy(&src, format!("{}/{}", man_dir, name))?;
+                man_count += 1;
+            }
+        }
+    }
+
     println!("Payload prepared under {}", dst);
     println!("  icons:    {} files under {}", icon_files, hicolor);
     println!("  mime:     {}", mime_path);
@@ -1440,6 +1474,11 @@ fn prepare_payload(dst: &str, prefix: &str) -> Result<(), Box<dyn std::error::Er
         println!("  nautilus: {}", p);
     } else {
         eprintln!("Note: nautilus_extension.py not found — Nautilus integration omitted from payload.");
+    }
+    if man_count > 0 {
+        println!("  man:      {} pages under {}", man_count, man_dir);
+    } else {
+        eprintln!("Note: docs/man/ not found — manpages omitted from payload.");
     }
     Ok(())
 }

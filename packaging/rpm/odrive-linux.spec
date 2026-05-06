@@ -120,6 +120,8 @@ kbuildsycoca6 --noincremental &>/dev/null || :
 %doc README.md
 %{_bindir}/odrive-cli
 %{_bindir}/odrive-gui
+%{_mandir}/man1/odrive-cli.1*
+%{_mandir}/man1/odrive-gui.1*
 %{_datadir}/applications/io.github.keithvassallomt.odrive-linux.desktop
 %{_datadir}/applications/odrive-linux-open.desktop
 %{_datadir}/mime/packages/odrive-linux.xml

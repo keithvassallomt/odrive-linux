@@ -1,0 +1,95 @@
+.\" Manpage for odrive-gui.
+.\" Source: https://github.com/keithvassallomt/odrive-linux
+.TH ODRIVE-GUI 1 "May 2026" "odrive-linux" "User Commands"
+.SH NAME
+odrive-gui \- GTK4 Manager for the odrive on-demand cloud sync agent
+.SH SYNOPSIS
+.B odrive-gui
+.SH DESCRIPTION
+.B odrive-gui
+is the GTK4 / Libadwaita Manager for odrive-linux. It launches an
+onboarding wizard the first time you run it (or whenever any of its
+preconditions stops being satisfied), then drops into a four-tab
+dashboard:
+.RS
+.IP \(bu 2
+.B Mount & Sync
+\(em mounts list, per-folder sync rules, lazy folder navigation.
+.IP \(bu 2
+.B Backup
+\(em local-to-remote backup jobs.
+.IP \(bu 2
+.B Encrypt
+\(em set the local passphrase for an existing zero-knowledge
+encryptor folder.
+.IP \(bu 2
+.B Trash
+\(em list, restore, and empty trashed items.
+.RE
+.PP
+Preferences (hamburger menu \(-> Preferences) opens a separate
+GNOME-Settings-shaped window with General / Appearance / Advanced /
+Status sub-pages, exposing every CLI threshold plus the file-based
+agent settings in
+.IR ~/.odrive-agent/odrive_user_general_conf.txt
+and
+.IR odrive_user_premium_conf.txt .
+A StatusNotifierItem icon ("tray icon") registers while the Manager
+is running, with menu entries to open the odrive folder, focus the
+Manager, pause/resume the agent, and quit. The icon animates while
+transfers are in flight.
+.PP
+.B odrive-gui
+takes no command-line arguments. All configuration lives in
+.IR ~/.config/odrive-linux/
+or in the Manager's Preferences window. State-changing operations
+shell out to
+.BR odrive-cli (1)
+which in turn drives the official upstream
+.B odrive
+binary.
+.SH FILES
+.TP
+.I ~/.odrive-agent/bin/
+Default location for the upstream
+.B odrive
+and
+.B odriveagent
+binaries the Manager drives.
+.TP
+.I ~/.odrive-linux.db
+SQLite database. Records placeholder index, folder sync rules, and
+in-flight sync state shared with
+.BR odrive-cli .
+.TP
+.I ~/.config/odrive-linux/config.toml
+User configuration: agent binary directory, tray-icon colour, Nautilus
+emblem preferences.
+.TP
+.I ~/.config/systemd/user/odrive.service
+Systemd-user unit written by the onboarding wizard.
+.TP
+.I ~/.odrive-agent/log/main.log
+Upstream agent log; view live from Preferences \(-> Status.
+.SH SEE ALSO
+.BR odrive-cli (1),
+.BR odrive (1),
+.BR systemctl (1)
+.PP
+Project home:
+.UR https://github.com/keithvassallomt/odrive-linux
+.UE
+.SH BUGS
+Report bugs at
+.UR https://github.com/keithvassallomt/odrive-linux/issues
+.UE .
+.SH AUTHOR
+Keith Vassallo and contributors.
+.SH COPYRIGHT
+Copyright \(co 2026 Keith Vassallo. Distributed under the terms of the
+GNU Affero General Public License version 3 or later.
+.SH DISCLAIMER
+.B odrive-linux
+is an unofficial Linux frontend. This project is not affiliated with
+Oxygen Cloud, Inc. or their odrive product. "odrive" is a registered
+trademark of Oxygen Cloud, Inc.
