@@ -2,6 +2,10 @@
 name = "odrive-gui"
 version = "0.1.0"
 edition = "2021"
+license = "AGPL-3.0-or-later"
+authors = ["Keith Vassallo <keith@icemalta.com>"]
+description = "GTK4/Libadwaita manager for the odrive on-demand cloud sync agent."
+repository = "https://github.com/keithvassallomt/odrive-linux"
 
 [dependencies]
 odrive-core = { path = "../odrive-core" }

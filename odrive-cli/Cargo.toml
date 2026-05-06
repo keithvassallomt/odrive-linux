@@ -2,6 +2,10 @@
 name = "odrive-cli"
 version = "0.1.0"
 edition = "2021"
+license = "AGPL-3.0-or-later"
+authors = ["Keith Vassallo <keith@icemalta.com>"]
+description = "Rust CLI for the odrive-linux manager: status, sync/unsync, mount, share-link, install-handlers."
+repository = "https://github.com/keithvassallomt/odrive-linux"
 
 [dependencies]
 odrive-core = { path = "../odrive-core" }

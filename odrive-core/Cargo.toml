@@ -2,6 +2,10 @@
 name = "odrive-core"
 version = "0.1.0"
 edition = "2021"
+license = "AGPL-3.0-or-later"
+authors = ["Keith Vassallo <keith@icemalta.com>"]
+description = "Shared library backing the odrive-linux manager: agent wrapper, SQLite state, config TOML, threshold parsers."
+repository = "https://github.com/keithvassallomt/odrive-linux"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
