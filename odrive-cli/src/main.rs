@@ -83,6 +83,24 @@ enum Commands {
     InstallHandlers,
     /// Remove the MIME / desktop registrations written by `install-handlers`.
     UninstallHandlers,
+    /// Materialise the static package payload (icons in hicolor layout, MIME
+    /// XML, .desktop files with system paths, Nautilus extension) under
+    /// `<DST><prefix>/share/...`. Used by the .deb / .rpm builds; not for
+    /// end users. Idempotent.
+    PreparePayload {
+        /// Destination root. The tree lands at `<DST><prefix>/share/...`.
+        dst: String,
+        /// Install prefix used in .desktop Exec lines. Default `/usr`
+        /// (Debian/Fedora convention).
+        #[arg(long, default_value = "/usr")]
+        prefix: String,
+    },
+    /// Per-user setup that .deb / .rpm post-install hooks can't do: pad
+    /// zero-byte placeholders so MIME resolution stops returning
+    /// `x-zerosize`, apply the mount-folder icon to existing mounts, and
+    /// set the packaged opener as the xdg-mime default for placeholder
+    /// MIMEs. Idempotent — re-run after upgrades.
+    Setup,
 }
 
 fn main() {
@@ -254,7 +272,72 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some(Commands::PreparePayload { dst, prefix }) => {
+            if let Err(e) = prepare_payload(&dst, &prefix) {
+                eprintln!("prepare-payload failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Some(Commands::Setup) => {
+            if let Err(e) = run_setup(&agent) {
+                eprintln!("setup failed: {}", e);
+                std::process::exit(1);
+            }
+        }
     }
+}
+
+/// Per-user finalisation step for packaged installs (and equivalent to the
+/// per-user portion of `install-handlers`). Walks every mount the agent
+/// reports and:
+///   - pads zero-byte placeholders via `scan_placeholders`, so GLib's
+///     `g_content_type_guess` resolves `*.cloud` / `*.cloudf` against our
+///     globs instead of `application/x-zerosize`;
+///   - tags the mount root with `MOUNT_FOLDER_ICON_NAME` via
+///     `set_folder_custom_icon` (which writes both `.directory` for
+///     Plasma and the GVFS `metadata::custom-icon-name` attribute for
+///     Nautilus);
+///   - sets `DESKTOP_NAME` as the xdg-mime default for the two
+///     placeholder MIMEs in the user's `~/.config/mimeapps.list`.
+///
+/// Idempotent: re-running after a package upgrade (or after adding a new
+/// mount) re-applies what's needed and silently no-ops on what's already
+/// in place. None of the side-effects are destructive.
+fn run_setup(agent: &OdriveAgent) -> Result<(), Box<dyn std::error::Error>> {
+    let mut padded = 0usize;
+    let mut tagged = 0usize;
+    match agent.get_mounts() {
+        Ok(mounts) => {
+            for m in mounts {
+                if odrive_core::set_folder_custom_icon(
+                    &m.local_path,
+                    odrive_core::MOUNT_FOLDER_ICON_NAME,
+                )
+                .is_ok()
+                {
+                    tagged += 1;
+                }
+                match agent.scan_placeholders(&m.local_path) {
+                    Ok(n) => padded += n,
+                    Err(e) => eprintln!("Scan failed for {}: {}", m.local_path, e),
+                }
+            }
+        }
+        Err(e) => eprintln!("Could not enumerate mounts: {}", e),
+    }
+
+    for mime in &[MIME_FILE, MIME_FOLDER] {
+        let _ = std::process::Command::new("xdg-mime")
+            .args(["default", DESKTOP_NAME, mime])
+            .status();
+    }
+
+    println!(
+        "Setup complete: padded/tracked {} placeholder(s), tagged {} mount(s).",
+        padded, tagged
+    );
+    println!("Restart your file manager to pick up icon changes (`nautilus -q` / `dolphin --quit; dolphin &`).");
+    Ok(())
 }
 
 fn strip_placeholder_suffix(path: &str) -> String {
@@ -1171,6 +1254,147 @@ fn uninstall_handlers() -> Result<(), Box<dyn std::error::Error>> {
         println!("Caches refreshed. Default-app entries in mimeapps.list may need manual cleanup.");
     } else {
         println!("Nothing to remove (handlers were not installed).");
+    }
+    Ok(())
+}
+
+/// Walk up from the running binary looking for the workspace's
+/// `nautilus_extension.py`. Same shape as `find_icons_dir`. Returns
+/// `None` if the file isn't found, in which case `prepare_payload`
+/// skips the Nautilus extension — packagers running the command from
+/// a non-workspace checkout can copy the file in by other means.
+fn find_nautilus_extension() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let mut cur = exe.as_path();
+    while let Some(parent) = cur.parent() {
+        let candidate = parent.join("nautilus_extension.py");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        cur = parent;
+    }
+    None
+}
+
+/// Materialise the static package payload (icons under hicolor/, MIME
+/// XML, .desktop files with system-stable Exec paths, the Nautilus
+/// Python extension) under `<dst><prefix>/share/...`. Reuses the same
+/// icon-installer helpers `install_handlers` calls; only the destination
+/// root and the .desktop Exec lines differ.
+///
+/// What this *doesn't* do (intentionally — these are per-user / runtime
+/// concerns the package's `postinst` / `%post` hook must trigger from
+/// the install host, or the user must do once via `odrive-cli setup`):
+///   - cache refresh (`gtk-update-icon-cache`, `update-mime-database`,
+///     `update-desktop-database`) — the package's post-install hook
+///     runs these against system dirs
+///   - `xdg-mime` defaults — per-user, lives in `~/.config/mimeapps.list`
+///   - `set_folder_custom_icon` on existing mounts — touches user files
+///     under `~/odrive`
+///   - placeholder padding — same reason
+///   - systemd unit — `OdriveAgent::write_systemd_unit` plants this
+///     per-user in `~/.config/systemd/user/` after the wizard's Install
+///     page lands the agent binary at `~/.odrive-agent/bin/odriveagent`;
+///     the path is per-user variable so a system-wide unit doesn't fit.
+fn prepare_payload(dst: &str, prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let icons_dir = find_icons_dir()
+        .ok_or("odrive-icons/ not found alongside the binary; run prepare-payload from a workspace checkout")?;
+
+    let share_root = format!("{}{}/share", dst, prefix);
+    let hicolor = format!("{}/icons/hicolor", share_root);
+    let mime_dir = format!("{}/mime/packages", share_root);
+    let app_dir = format!("{}/applications", share_root);
+    let nautilus_dir = format!("{}/nautilus-python/extensions", share_root);
+
+    std::fs::create_dir_all(&mime_dir)?;
+    std::fs::create_dir_all(&app_dir)?;
+    std::fs::create_dir_all(&nautilus_dir)?;
+
+    let mut icon_files = 0usize;
+    for (subdir, name) in EMBLEMS {
+        icon_files += install_icon_set(
+            &icons_dir.join("emblems").join(subdir),
+            &hicolor,
+            "emblems",
+            name,
+        )?;
+        icon_files += install_small_size_shims(
+            &icons_dir.join("emblems").join(subdir),
+            &hicolor,
+            "emblems",
+            name,
+        )?;
+    }
+    for (subdir, stem, _globs) in CLOUD_TYPES {
+        let target = format!("odrive-{}-cloud", stem);
+        icon_files += install_icon_set(
+            &icons_dir.join("cloud-file-types").join(subdir),
+            &hicolor,
+            "mimetypes",
+            &target,
+        )?;
+    }
+    for color in TRAY_COLORS {
+        icon_files += install_tray_icon(&icons_dir, &hicolor, color)?;
+        icon_files += install_tray_animation(&icons_dir, &hicolor, color)?;
+    }
+    icon_files += install_mount_folder_icon(&icons_dir, &hicolor)?;
+    icon_files += install_placeholder_icon(&icons_dir, &hicolor, "cloud-file", PLACEHOLDER_FILE_ICON)?;
+    icon_files += install_placeholder_icon(&icons_dir, &hicolor, "cloud-folder", PLACEHOLDER_FOLDER_ICON)?;
+    icon_files += install_icon_set(&icons_dir.join("app-icon"), &hicolor, "apps", APP_MENU_ICON)?;
+    icon_files += install_icon_set(&icons_dir.join("app-icon"), &hicolor, "apps", APP_LAUNCHER_ICON)?;
+
+    let mime_path = format!("{}/{}", mime_dir, MIME_XML_NAME);
+    std::fs::write(&mime_path, build_mime_xml())?;
+
+    let cli_path = format!("{}/bin/odrive-cli", prefix);
+    let desktop = format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=odrive Cloud Sync\n\
+         Comment=Materialize and open odrive placeholders\n\
+         Exec={} open %f\n\
+         NoDisplay=true\n\
+         MimeType={};{};\n\
+         Icon=folder-remote\n",
+        cli_path, MIME_FILE, MIME_FOLDER,
+    );
+    let desktop_path = format!("{}/{}", app_dir, DESKTOP_NAME);
+    std::fs::write(&desktop_path, desktop)?;
+
+    let gui_path = format!("{}/bin/odrive-gui", prefix);
+    let launcher = format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=odrive Manager\n\
+         Comment=Manage odrive cloud sync, mounts, and folder rules\n\
+         Exec={}\n\
+         Icon={}\n\
+         StartupWMClass={}\n\
+         Terminal=false\n\
+         Categories=Network;Utility;FileTransfer;\n",
+        gui_path, APP_LAUNCHER_ICON, APP_LAUNCHER_ICON,
+    );
+    let launcher_path = format!("{}/{}", app_dir, APP_DESKTOP_NAME);
+    std::fs::write(&launcher_path, launcher)?;
+
+    let nautilus_path = if let Some(src) = find_nautilus_extension() {
+        let target = format!("{}/odrive-linux.py", nautilus_dir);
+        std::fs::copy(&src, &target)?;
+        Some(target)
+    } else {
+        None
+    };
+
+    println!("Payload prepared under {}", dst);
+    println!("  icons:    {} files under {}", icon_files, hicolor);
+    println!("  mime:     {}", mime_path);
+    println!("  handler:  {}", desktop_path);
+    println!("  launcher: {}", launcher_path);
+    if let Some(p) = nautilus_path {
+        println!("  nautilus: {}", p);
+    } else {
+        eprintln!("Note: nautilus_extension.py not found — Nautilus integration omitted from payload.");
     }
     Ok(())
 }

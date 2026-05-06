@@ -1,0 +1,80 @@
+Source: odrive-linux
+Section: net
+Priority: optional
+Maintainer: Keith Vassallo <keith@icemalta.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ pkg-config,
+ libgtk-4-dev (>= 4.12),
+ libadwaita-1-dev (>= 1.5),
+ libsqlite3-dev,
+ cmake (>= 3.16),
+ extra-cmake-modules,
+ qt6-base-dev,
+ libkf6kio-dev,
+ libkf6coreaddons-dev,
+ libkf6i18n-dev,
+Standards-Version: 4.6.2
+Homepage: https://github.com/keithvassallomt/odrive-linux
+Vcs-Browser: https://github.com/keithvassallomt/odrive-linux
+Vcs-Git: https://github.com/keithvassallomt/odrive-linux.git
+Rules-Requires-Root: no
+
+Package: odrive-linux
+Architecture: any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ libgtk-4-1 (>= 4.12),
+ libadwaita-1-0 (>= 1.5),
+ wl-clipboard | xclip,
+ xdg-utils,
+ curl,
+Recommends:
+ gnome-shell-extension-appindicator,
+Suggests:
+ odrive-linux-nautilus,
+ odrive-linux-dolphin,
+Description: Linux frontend for odrive on-demand cloud sync
+ odrive-linux is a native Linux manager around odrive's headless agent
+ (odriveagent) and CLI (odrive). It ships a GTK4/Libadwaita Manager,
+ a Rust CLI, an onboarding wizard that downloads and registers the
+ official agent on first launch, MIME registrations for *.cloud /
+ *.cloudf placeholder files, and a system-tray indicator.
+ .
+ Install odrive-linux-nautilus or odrive-linux-dolphin alongside this
+ package for first-class right-click integration in your file manager.
+ .
+ GNOME 46+ or KDE Plasma 6.0+ recommended.
+
+Package: odrive-linux-nautilus
+Architecture: all
+Depends:
+ ${misc:Depends},
+ odrive-linux (= ${binary:Version}),
+Recommends:
+ python3-nautilus,
+Description: Nautilus right-click integration for odrive-linux
+ Python extension that adds an "Odrive" submenu to Nautilus's
+ right-click menu (Sync, Unsync, Refresh, Share Storage, Copy Share
+ Link, Open Web Preview) and emblem decorations on placeholders and
+ synced files.
+ .
+ Requires python3-nautilus to actually load — install that package or
+ your Nautilus session won't see the extension.
+
+Package: odrive-linux-dolphin
+Architecture: any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ odrive-linux (= ${binary:Version}),
+Recommends:
+ dolphin,
+Description: Dolphin right-click integration for odrive-linux
+ Qt6/KF6 KFileItemAction and KOverlayIcon plugins giving Dolphin
+ first-class odrive integration: an "Odrive" right-click submenu
+ that filters to in-mount selections, plus per-file emblem overlays
+ for synced and syncing items.
+ .
+ Plasma 6.0 or newer required.

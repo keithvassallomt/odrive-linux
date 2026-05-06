@@ -1,0 +1,158 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (must already exist on the repo)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-deb:
+    name: Build .deb (debian:13)
+    runs-on: ubuntu-latest
+    container:
+      image: debian:13
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential debhelper devscripts dpkg-dev fakeroot \
+            pkg-config \
+            libgtk-4-dev libadwaita-1-dev libsqlite3-dev \
+            cmake extra-cmake-modules \
+            qt6-base-dev libkf6kio-dev libkf6coreaddons-dev libkf6i18n-dev \
+            ca-certificates curl git
+
+      - name: Install Rust toolchain (apt rustup → stable)
+        # Trixie's apt-shipped rustc is 1.85, older than the MSRV of our
+        # zbus deps (1.87). Debian's `rustup` package conflicts with
+        # apt-cargo/apt-rustc but ships a working rustup binary; we use
+        # it to lay down current stable.
+        run: |
+          apt-get install -y rustup
+          rustup default stable
+          echo "${HOME}/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build .deb packages
+        run: |
+          # 3.0 (native) source format builds straight from the working
+          # tree. The .deb files land in the parent directory by default.
+          dpkg-buildpackage -us -uc -b
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+          mv ../odrive-linux*.deb dist/
+          ls -la dist/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-packages
+          path: dist/*.deb
+
+  build-rpm:
+    name: Build .rpm (fedora:41)
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:41
+    steps:
+      - name: Install build dependencies
+        run: |
+          dnf install -y \
+            rpm-build rpmdevtools rustup \
+            pkgconf-pkg-config \
+            gtk4-devel libadwaita-devel sqlite-devel \
+            cmake extra-cmake-modules \
+            qt6-qtbase-devel kf6-kio-devel kf6-kcoreaddons-devel kf6-ki18n-devel \
+            desktop-file-utils shared-mime-info gtk-update-icon-cache \
+            git tar gzip
+
+      - name: Install Rust toolchain (rustup)
+        # Fedora's `cargo`/`rust` packages may lag the MSRV of our zbus
+        # deps. Use rustup-init from the rustup package to lay down stable.
+        run: |
+          rustup-init -y --no-modify-path --default-toolchain stable
+          echo "${HOME}/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        run: |
+          # Read version from the workspace's odrive-cli/Cargo.toml so
+          # tag and Cargo metadata stay in sync.
+          ver="$(grep -m1 '^version' odrive-cli/Cargo.toml | cut -d'"' -f2)"
+          echo "version=${ver}" >> "$GITHUB_OUTPUT"
+          echo "Building odrive-linux-${ver}"
+
+      - name: Stage source tarball
+        run: |
+          ver="${{ steps.ver.outputs.version }}"
+          mkdir -p ~/rpmbuild/{SOURCES,SPECS,BUILD,RPMS,SRPMS}
+          # %autosetup expects the tarball to extract to <name>-<version>/.
+          git archive --format=tar --prefix="odrive-linux-${ver}/" HEAD | \
+            gzip > ~/rpmbuild/SOURCES/odrive-linux-${ver}.tar.gz
+          cp packaging/rpm/odrive-linux.spec ~/rpmbuild/SPECS/
+
+      - name: Build .rpm packages
+        run: rpmbuild -ba ~/rpmbuild/SPECS/odrive-linux.spec
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+          find ~/rpmbuild/RPMS -name '*.rpm' -exec cp {} dist/ \;
+          find ~/rpmbuild/SRPMS -name '*.rpm' -exec cp {} dist/ \;
+          ls -la dist/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-packages
+          path: dist/*.rpm
+
+  release:
+    name: Attach artifacts to GitHub release
+    needs: [build-deb, build-rpm]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download .deb artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: deb-packages
+          path: dist
+
+      - name: Download .rpm artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: rpm-packages
+          path: dist
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true

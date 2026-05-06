@@ -1,0 +1,12 @@
+odrive-linux (0.1.0) unstable; urgency=medium
+
+  * Initial release.
+  * GTK4/Libadwaita Manager with onboarding wizard, mount management,
+    folder sync rules, backup jobs, trash, encryptor folders, advanced
+    agent settings, log viewer, and tray indicator.
+  * Rust CLI for status, sync/unsync, mount, share-link, and packaging
+    payload generation.
+  * Optional Nautilus right-click integration (separate package).
+  * Optional Dolphin Qt6/KF6 integration (separate package).
+
+ -- Keith Vassallo <keith@icemalta.com>  Wed, 06 May 2026 17:30:50 +0100

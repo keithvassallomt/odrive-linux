@@ -1,3 +1,18 @@
 /target
 __pycache__/
 *.pyc
+/packaging/build/
+/dist/
+
+# debian/ build artifacts (per-package staging dirs and substvars)
+/debian/.debhelper/
+/debian/cargo-home/
+/debian/files
+/debian/debhelper-build-stamp
+/debian/*.substvars
+/debian/odrive-linux/
+/debian/odrive-linux-nautilus/
+/debian/odrive-linux-dolphin/
+/debian/tmp/
+# CMake build output for the Dolphin plugin tree
+/dolphin-plugin/build/

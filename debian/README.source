@@ -1,0 +1,18 @@
+Building odrive-linux from source
+==================================
+
+The Rust toolchain on Debian Trixie (rustc 1.85) is currently older than
+the minimum required by some of our transitive dependencies (zbus / zvariant
+need 1.87+). Install a recent stable toolchain via apt's rustup package
+before running `dpkg-buildpackage`:
+
+    sudo apt-get install rustup
+    rustup default stable
+    export PATH="$HOME/.cargo/bin:$PATH"
+
+`cargo` and `rustc` are intentionally not declared as Build-Depends in
+debian/control because the apt-shipped versions are too old. The
+GitHub-Actions release workflow does the rustup install automatically.
+
+Once Trixie's rustc catches up (likely via trixie-backports), this note
+and the Build-Depends omission can be reverted.

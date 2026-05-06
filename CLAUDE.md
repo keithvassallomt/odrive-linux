@@ -54,6 +54,31 @@ Restart Dolphin (`dolphin --quit; dolphin &`) after install. The plugins look up
 
 See `CONTRIBUTING.md` for the full DCO text and contributor-facing instructions.
 
+## Packaging (.deb / .rpm / one-line installer)
+
+End users install via `curl -fsSL https://raw.githubusercontent.com/keithvassallomt/odrive-linux/main/install.sh | bash`. The script detects distro family (`/etc/os-release` ID/ID_LIKE → deb vs rpm), detects desktop (`$XDG_CURRENT_DESKTOP` → nautilus vs dolphin integration), downloads the matching .deb/.rpm artifacts from the latest GitHub release, and runs `apt`/`dnf` with sudo. Re-running upgrades. Flags: `--tag <vX.Y.Z>` for a specific release, `--base-only`/`--all` for integration overrides, `--dry-run` for inspection.
+
+Each release ships **three binary packages per distro** (six total, plus auto-generated debug subpackages):
+- `odrive-linux` — base: `odrive-cli` + `odrive-gui` + icons + MIME XML + .desktop launcher + handler.
+- `odrive-linux-nautilus` — Python extension (`/usr/share/nautilus-python/extensions/odrive-linux.py`); `Recommends: python3-nautilus`.
+- `odrive-linux-dolphin` — Qt6/KF6 plugin .so files (`/usr/lib*/qt6/plugins/kf6/{kfileitemaction,overlayicon}/`); `Recommends: dolphin`. Postinst runs `kbuildsycoca6 --noincremental` so Dolphin picks up the plugins on next launch.
+
+Build orchestration:
+- **`debian/`** — proper Debian source-package tree (`3.0 (native)` format) driven by `dpkg-buildpackage`. Per-package `.install` files filter `debian/tmp/` into the three binary packages. `debian/rules` runs `cargo build --release --workspace` + `cmake --build dolphin-plugin/build` in `dh_auto_build`, then in `dh_auto_install` calls `target/release/odrive-cli prepare-payload debian/tmp` to lay out the static-asset tree (mirroring what `install-handlers` does, but writing to a destination root with system-stable `Exec=/usr/bin/...` paths) and `cmake --install dolphin-plugin/build` for the plugins.
+- **`packaging/rpm/odrive-linux.spec`** — same shape with three subpackages. `%build` mirrors `dh_auto_build`; `%install` mirrors `dh_auto_install`. `%post`/`%postun` refresh the icon/MIME/desktop caches; the dolphin subpackage's `%post` runs `kbuildsycoca6` like the .deb.
+- **`.github/workflows/release.yml`** — triggered on `v*` tags; matrix builds .deb in a `debian:13` container, .rpm in a `fedora:41` container, attaches all artifacts to the GitHub release. `softprops/action-gh-release@v2` does the upload. Also accepts `workflow_dispatch` with a `tag` input for manual rebuilds.
+
+Two pieces of `odrive-cli` infrastructure feed packaging:
+- **`prepare-payload <dst> [--prefix /usr]`** — reuses the `install_icon_set` / `install_tray_icon` / `install_tray_animation` / `install_mount_folder_icon` / `install_placeholder_icon` helpers (same code that `install-handlers` calls for dev installs) but writes to `<dst><prefix>/share/...` instead of `~/.local/share/...`. Also writes the .desktop files with system paths (`Exec=/usr/bin/odrive-cli open %f`, `Exec=/usr/bin/odrive-gui`) and copies `nautilus_extension.py` to `<dst><prefix>/share/nautilus-python/extensions/odrive-linux.py`. Doesn't touch caches, mimeapps.list, mounts, or placeholders — those are runtime concerns.
+- **`setup`** — the per-user finalisation step a `postinst` / `%post` hook can't run because they execute as root and pre-user-login. Pads zero-byte placeholders, applies the mount-folder icon to existing mounts, and sets the packaged opener as the xdg-mime default in `~/.config/mimeapps.list`. Idempotent; users run it once after their first GUI mount, and again after upgrades. The wizard could call this auto on first mount; not yet wired.
+
+**Non-obvious gotchas:**
+- **Debian Trixie's apt-shipped rustc is 1.85; our `zbus` deps need 1.87+.** Both build environments use the apt/dnf `rustup` package and `rustup default stable` (no `curl | sh` install). `cargo` and `rust`/`rustc` are deliberately *not* in `Build-Depends` / `BuildRequires`. A `debian/README.source` documents the rustup workaround for downstream builders. Once Trixie's rustc catches up (probably via trixie-backports), the workaround can revert.
+- **`debian/odrive-linux.lintian-overrides` silences `icon-size-and-directory-name-mismatch`** for the tray-icon shims — same panel-bucket trick `install_tray_icon` uses (1024×1024 master deposited under `48x48/status/` and `256x256/status/` because SNI hosts on GNOME only walk small buckets when resolving icon names; see "Non-obvious things to know before editing").
+- **Source format is `3.0 (native)`** — no upstream/.orig.tar.gz separation, the entire working tree *is* the source. `dpkg-buildpackage -us -uc -b` builds straight from the checkout. The .rpm side ships a `git archive --prefix=odrive-linux-${ver}/` tarball into `~/rpmbuild/SOURCES/`; the workflow does that.
+- **`%autosetup -n %{name}-%{version}`** in the spec requires the source tarball to extract to a directory named `odrive-linux-<version>/` exactly. The workflow's `git archive --prefix=odrive-linux-${ver}/` matches this.
+- **dbgsym subpackages** are auto-emitted by both build systems (debhelper writes `odrive-linux-dbgsym_<v>_<arch>.deb`, rpmbuild writes `odrive-linux-debuginfo`). Harmless, helps users producing crash dumps; the release workflow uploads them alongside the regular packages.
+
 ## Runtime prerequisites the code assumes
 
 These are not installed by this repo — the user must have them set up before any of this code is useful:

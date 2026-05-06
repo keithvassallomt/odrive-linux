@@ -1,0 +1,15 @@
+#!/bin/sh
+# Rebuild KDE's service cache so Dolphin picks up the new plugins on
+# next launch. Failure is non-fatal — the user can run kbuildsycoca6
+# manually if needed.
+set -e
+
+if [ "$1" = "configure" ]; then
+    if command -v kbuildsycoca6 >/dev/null 2>&1; then
+        kbuildsycoca6 --noincremental >/dev/null 2>&1 || true
+    fi
+fi
+
+#DEBHELPER#
+
+exit 0

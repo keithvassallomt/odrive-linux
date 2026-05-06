@@ -1,0 +1,14 @@
+#!/bin/sh
+# Refresh KDE's service cache after plugin removal so Dolphin stops
+# trying to resolve the missing .so files.
+set -e
+
+if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+    if command -v kbuildsycoca6 >/dev/null 2>&1; then
+        kbuildsycoca6 --noincremental >/dev/null 2>&1 || true
+    fi
+fi
+
+#DEBHELPER#
+
+exit 0

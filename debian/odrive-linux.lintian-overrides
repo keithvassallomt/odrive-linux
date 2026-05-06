@@ -1,0 +1,7 @@
+# Tray icons under 256x256/status/ are deliberately the 1024x1024 source
+# masters — SNI hosts on GNOME walk only panel-size buckets when resolving
+# IconName lookups (16/22/24/32/48), so we drop the master in 48x48/ as a
+# shim. The 256x256 copy is the high-DPI version. Both file managers and
+# panel hosts load icons by file path and scale at render time, so the
+# size mismatch with the directory name is harmless.
+odrive-linux: icon-size-and-directory-name-mismatch

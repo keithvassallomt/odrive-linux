@@ -1,0 +1,49 @@
+#!/usr/bin/make -f
+#
+# Build orchestration for odrive-linux. dh runs the standard sequence;
+# overrides below tell it to use cargo for the Rust workspace and cmake
+# for the Dolphin plugin tree (kept out of the Cargo workspace because
+# Cargo can't drive Qt's MOC pipeline).
+
+export DH_VERBOSE = 1
+
+# Cargo writes registry/index/cache under $CARGO_HOME — keep it inside
+# the build dir so a system-wide build doesn't pollute the user's
+# ~/.cargo and survives clean-room CI rebuilds.
+export CARGO_HOME = $(CURDIR)/debian/cargo-home
+
+# Package staging root — debhelper's .install files filter from here
+# into each binary package's directory.
+STAGE = debian/tmp
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	mkdir -p dolphin-plugin/build
+	cd dolphin-plugin/build && cmake .. \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_INSTALL_PREFIX=/usr
+
+override_dh_auto_build:
+	cargo build --release --workspace --locked
+	cmake --build dolphin-plugin/build --parallel
+
+override_dh_auto_test:
+	cargo test --release --workspace --locked
+
+override_dh_auto_install:
+	mkdir -p $(STAGE)/usr/bin
+	install -m755 target/release/odrive-cli $(STAGE)/usr/bin/odrive-cli
+	install -m755 target/release/odrive-gui $(STAGE)/usr/bin/odrive-gui
+	# Static payload: icons, MIME XML, .desktop files, Nautilus extension.
+	# The CLI we just built knows how to lay this out (it's the same code
+	# path install-handlers uses, parameterised by destination root).
+	./target/release/odrive-cli prepare-payload $(STAGE)
+	# Dolphin plugins via cmake's install rule. Lands under
+	# $(STAGE)/usr/lib/<arch>/qt6/plugins/kf6/{kfileitemaction,overlayicon}/.
+	DESTDIR=$(CURDIR)/$(STAGE) cmake --install dolphin-plugin/build
+
+override_dh_auto_clean:
+	cargo clean || true
+	rm -rf dolphin-plugin/build $(CARGO_HOME)
