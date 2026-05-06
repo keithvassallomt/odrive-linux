@@ -815,12 +815,18 @@ fn install_placeholder_icon(
 }
 
 /// Install the mascot illustration shown in the GUI's About dialog.
-/// Single bundled source PNG, non-square (1536×1024). Lands at
-/// `<hicolor>/1024x1024/apps/<MASCOT_ICON_NAME>.png` so a plain
-/// `Adw.AboutWindow::application_icon(MASCOT_ICON_NAME)` call resolves
-/// it; GTK loads PNGs by file path and scales at render time, so the
-/// directory bucket name vs. actual pixel size mismatch is harmless
-/// (and covered by the existing icon-size lintian override).
+/// Single bundled source PNG, non-square (1536×1024). Drops copies
+/// into a handful of standard hicolor app-icon buckets so GTK's
+/// `IconTheme::lookup_icon` (which walks 16/22/24/32/48/64/96/128/
+/// 192/256/512 — *not* 1024) actually finds the file. GTK loads PNGs
+/// by file path and scales at render time so the bucket-name vs.
+/// actual-pixel-size mismatch is cosmetic — and covered by the
+/// existing icon-size lintian override.
+///
+/// We do *not* drop into 16/22/24 because the mascot is a detailed
+/// illustration that wouldn't read at panel-thumbnail sizes; about-
+/// dialog rendering picks 128 or 256 depending on display scale and
+/// scales up to 512 for HiDPI, so those three buckets are sufficient.
 ///
 /// Returns the count of files copied. Missing source PNG yields `Ok(0)`
 /// — defensive shape matching the other icon installers.
@@ -832,10 +838,14 @@ fn install_mascot_icon(
     if !src.is_file() {
         return Ok(0);
     }
-    let dst_dir = format!("{}/1024x1024/apps", hicolor);
-    std::fs::create_dir_all(&dst_dir)?;
-    std::fs::copy(&src, format!("{}/{}.png", dst_dir, MASCOT_ICON_NAME))?;
-    Ok(1)
+    let mut count = 0usize;
+    for size in ["128x128", "256x256", "512x512", "1024x1024"] {
+        let dst_dir = format!("{}/{}/apps", hicolor, size);
+        std::fs::create_dir_all(&dst_dir)?;
+        std::fs::copy(&src, format!("{}/{}.png", dst_dir, MASCOT_ICON_NAME))?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 /// Parse a size from a dash-separated filename stem like `cloud-file-512x512` → 512.
