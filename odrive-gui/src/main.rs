@@ -1,4 +1,5 @@
 mod backup_page;
+mod encrypt_page;
 mod indicator;
 mod log_viewer;
 mod mount_detail;
@@ -195,11 +196,11 @@ fn build_dashboard_page(
     install_menu_actions(&app, menu.1);
     header.pack_start(&menu_btn);
 
-    // Top-level shell is now four tabs: Mount & Sync (the original
-    // mounts list + folder navigation), Backup, Encrypt, Trash. The
-    // latter three are stub StatusPages today — they'll get real
-    // content as those features land. The ViewSwitcher is forced to
-    // NARROW policy so the tabs render icon-only regardless of window
+    // Top-level shell is four tabs: Mount & Sync (the original
+    // mounts list + folder navigation), Backup, Encrypt, Trash. Each
+    // is built by its own `*_page::build_*_page` module. The
+    // ViewSwitcher is forced to NARROW policy so the tabs render
+    // icon-only regardless of window
     // width (matches the user's spec: "Tabs use icons, not text").
     let stack = adw::ViewStack::new();
 
@@ -213,11 +214,7 @@ fn build_dashboard_page(
         .add_titled_with_icon(&backup, Some("backup"), "Backup", "drive-harddisk-symbolic")
         .set_icon_name(Some("drive-harddisk-symbolic"));
 
-    let encrypt = stub_status_page(
-        "Encrypt",
-        "Encryption configuration will live here.",
-        "channel-secure-symbolic",
-    );
+    let encrypt = encrypt_page::build_encrypt_page(agent.clone(), overlay.clone());
     stack
         .add_titled_with_icon(&encrypt, Some("encrypt"), "Encrypt", "channel-secure-symbolic")
         .set_icon_name(Some("channel-secure-symbolic"));
@@ -397,17 +394,6 @@ fn build_mount_sync_page(
     });
 
     page
-}
-
-/// Placeholder content for the Backup / Encrypt / Trash tabs.
-/// Each lands as a real `PreferencesPage` once the corresponding
-/// feature is wired up.
-fn stub_status_page(title: &str, description: &str, icon_name: &str) -> StatusPage {
-    StatusPage::builder()
-        .icon_name(icon_name)
-        .title(title)
-        .description(description)
-        .build()
 }
 
 /// Build one row in the **Sync Rules** group. Body click → push the

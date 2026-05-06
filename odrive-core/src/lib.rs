@@ -1201,6 +1201,45 @@ curl -fL "https://dl.odrive.com/odrivecli-lnx-64" | tar -xzf- -C "$od/"
         Ok(parse_backups_status(&String::from_utf8_lossy(&output.stdout)))
     }
 
+    /// `odrive encpassphrase <passphrase> <id> [--initialize]` — set
+    /// (or initialize) the local-only passphrase for an encryptor
+    /// folder. The agent stores the passphrase in its SEE-encrypted DB
+    /// after this call, then transparently decrypts content while it's
+    /// running.
+    ///
+    /// `initialize=true` matches the upstream `--initialize` flag and
+    /// is for a brand-new encryptor folder where no passphrase has yet
+    /// been set; `initialize=false` is the routine "save the
+    /// passphrase the user already chose elsewhere" case. The agent's
+    /// IPC test-then-set logic only kicks in when initialize is false:
+    /// a wrong passphrase fails the agent-side test and renders an
+    /// "encryptor wrong password" dialog (no-op on Linux) without
+    /// persisting.
+    pub fn set_encryption_passphrase(
+        &self,
+        passphrase: &str,
+        encryptor_id: &str,
+        initialize: bool,
+    ) -> Result<String, OdriveError> {
+        let mut cmd = Command::new(&self.bin_path);
+        cmd.arg("encpassphrase");
+        if initialize {
+            cmd.arg("--initialize");
+        }
+        cmd.arg(passphrase).arg(encryptor_id);
+        let output = cmd.output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let msg = if !stderr.is_empty() { stderr } else { stdout };
+            return Err(OdriveError::CliError(format!(
+                "odrive encpassphrase failed: {}",
+                msg
+            )));
+        }
+        Ok(stdout)
+    }
+
     /// IPC-direct read of `lastBackupTime` and `timeTillNextBackup`.
     /// The CLI's status pretty-printer drops both fields, so the only
     /// way to surface them is to speak the agent's JSON IPC ourselves.
