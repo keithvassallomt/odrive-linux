@@ -18,9 +18,10 @@ use libadwaita as adw;
 use adw::prelude::*;
 use adw::{
     ActionRow, ApplicationWindow, ComboRow, HeaderBar, NavigationPage, NavigationSplitView,
-    PreferencesGroup, PreferencesPage, SpinRow, StatusPage, SwitchRow, Toast, ToastOverlay,
+    PreferencesGroup, PreferencesPage, SpinRow, StatusPage, SwitchRow, ToastOverlay,
     ToolbarView, WindowTitle,
 };
+use crate::toasts::{error_toast, toast};
 use adw::gtk::{
     self, glib, Adjustment, Application, Button, Label, ListBox, ListBoxRow, SelectionMode,
     Stack, StackTransitionType, StringList,
@@ -543,7 +544,7 @@ fn write_conf(
         ConfFile::Premium => agent.write_premium_conf(value),
     };
     if let Err(e) = result {
-        overlay.add_toast(Toast::new(&format!("Couldn't save setting: {}", e)));
+        overlay.add_toast(error_toast(&format!("Couldn't save setting: {}", e)));
     }
 }
 
@@ -849,7 +850,7 @@ fn build_status_page(
                 .application()
                 .and_then(|a| a.downcast::<Application>().ok())
             else {
-                overlay.add_toast(Toast::new("Could not resolve application"));
+                overlay.add_toast(error_toast("Could not resolve application"));
                 return;
             };
             crate::log_viewer::present(&app, Some(&window));
@@ -861,7 +862,7 @@ fn build_status_page(
         move |_| {
             let dir = crate::log_viewer::log_dir();
             if let Err(e) = std::process::Command::new("xdg-open").arg(&dir).spawn() {
-                overlay.add_toast(Toast::new(&format!("Could not open log folder: {}", e)));
+                overlay.add_toast(error_toast(&format!("Could not open log folder: {}", e)));
             }
         }
     });
@@ -903,7 +904,7 @@ fn build_status_page(
                 let _ = agent.start();
             }
             refresh();
-            overlay.add_toast(Toast::new("Status updated"));
+            overlay.add_toast(toast("Status updated"));
         }
     });
 
@@ -927,11 +928,11 @@ fn build_status_page(
                     match result {
                         Ok(count) => {
                             overlay_for_done
-                                .add_toast(Toast::new(&format!("Found {} placeholders", count)));
+                                .add_toast(toast(&format!("Found {} placeholders", count)));
                             refresh_for_done();
                         }
                         Err(e) => overlay_for_done
-                            .add_toast(Toast::new(&format!("Scan failed: {}", e))),
+                            .add_toast(error_toast(&format!("Scan failed: {}", e))),
                     }
                 },
             );
@@ -982,7 +983,7 @@ fn wire_emblem_switch(row: &adw::SwitchRow, kind: EmblemKind, overlay: ToastOver
             EmblemKind::Syncing => cfg.nautilus_syncing_emblem = active,
         }
         if let Err(e) = cfg.save() {
-            overlay.add_toast(Toast::new(&format!("Could not save preference: {}", e)));
+            overlay.add_toast(error_toast(&format!("Could not save preference: {}", e)));
         }
     });
 }
@@ -1117,9 +1118,9 @@ fn wire_placeholder(
             return;
         };
         match agent.placeholder_threshold(value) {
-            Ok(_) => overlay.add_toast(Toast::new("Sync threshold updated")),
+            Ok(_) => overlay.add_toast(toast("Sync threshold updated")),
             Err(e) => {
-                overlay.add_toast(Toast::new(&format!("Update failed: {}", e)));
+                overlay.add_toast(error_toast(&format!("Update failed: {}", e)));
                 revert_to_agent_state(&row_clone, &agent, &suppress, GlobalSelector::Placeholder);
             }
         }
@@ -1142,9 +1143,9 @@ fn wire_xl(
             return;
         };
         match agent.xl_threshold(value) {
-            Ok(_) => overlay.add_toast(Toast::new("Split threshold updated")),
+            Ok(_) => overlay.add_toast(toast("Split threshold updated")),
             Err(e) => {
-                overlay.add_toast(Toast::new(&format!("Update failed: {}", e)));
+                overlay.add_toast(error_toast(&format!("Update failed: {}", e)));
                 revert_to_agent_state(&row_clone, &agent, &suppress, GlobalSelector::Xl);
             }
         }
@@ -1167,9 +1168,9 @@ fn wire_auto_unsync(
             return;
         };
         match agent.auto_unsync_threshold(value) {
-            Ok(_) => overlay.add_toast(Toast::new("Unsync threshold updated")),
+            Ok(_) => overlay.add_toast(toast("Unsync threshold updated")),
             Err(e) => {
-                overlay.add_toast(Toast::new(&format!("Update failed: {}", e)));
+                overlay.add_toast(error_toast(&format!("Update failed: {}", e)));
                 revert_to_agent_state(&row_clone, &agent, &suppress, GlobalSelector::AutoUnsync);
             }
         }
@@ -1192,9 +1193,9 @@ fn wire_auto_trash(
             return;
         };
         match agent.auto_trash_threshold(value) {
-            Ok(_) => overlay.add_toast(Toast::new("Empty-trash cadence updated")),
+            Ok(_) => overlay.add_toast(toast("Empty-trash cadence updated")),
             Err(e) => {
-                overlay.add_toast(Toast::new(&format!("Update failed: {}", e)));
+                overlay.add_toast(error_toast(&format!("Update failed: {}", e)));
                 revert_to_agent_state(&row_clone, &agent, &suppress, GlobalSelector::AutoTrash);
             }
         }
@@ -1219,7 +1220,7 @@ fn wire_tray_color(
         let mut cfg = OdriveConfig::load();
         cfg.tray_icon_color = color.to_string();
         if let Err(e) = cfg.save() {
-            overlay.add_toast(Toast::new(&format!("Could not save preference: {}", e)));
+            overlay.add_toast(error_toast(&format!("Could not save preference: {}", e)));
         }
         tray.set_icon_color(color);
     });

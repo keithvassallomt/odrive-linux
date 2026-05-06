@@ -37,11 +37,12 @@ use crate::worker;
 use adw::gtk::glib;
 use adw::prelude::*;
 use adw::{
-    ActionRow, MessageDialog, PreferencesGroup, PreferencesPage, ResponseAppearance, Toast,
+    ActionRow, MessageDialog, PreferencesGroup, PreferencesPage, ResponseAppearance,
     ToastOverlay,
 };
 use libadwaita as adw;
 use odrive_core::{OdriveAgent, TrashItem};
+use crate::toasts::{error_toast, toast};
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
@@ -331,14 +332,14 @@ fn confirm_and_run_bulk(
                     BulkAction::Empty => agent_inner.empty_trash().map(|_| ()),
                 },
                 move |result| {
-                    let toast = match (action, result) {
+                    let t = match (action, result) {
                         (BulkAction::Restore, Ok(())) => {
-                            Toast::new("Trash restored as placeholders")
+                            toast("Trash restored as placeholders")
                         }
-                        (BulkAction::Empty, Ok(())) => Toast::new("Trash emptied"),
-                        (_, Err(e)) => Toast::new(&format!("Trash action failed: {}", e)),
+                        (BulkAction::Empty, Ok(())) => toast("Trash emptied"),
+                        (_, Err(e)) => error_toast(&format!("Trash action failed: {}", e)),
                     };
-                    overlay_w.add_toast(toast);
+                    overlay_w.add_toast(t);
                 },
             );
         }
@@ -445,7 +446,7 @@ fn run_restore_one(
                 } else {
                     "Restored 1 item.".to_string()
                 };
-                overlay.add_toast(Toast::new(&msg));
+                overlay.add_toast(toast(&msg));
             }
             Ok(failures) => {
                 eprintln!(
@@ -455,12 +456,12 @@ fn run_restore_one(
                 for (path, err) in &failures {
                     eprintln!("  {} → {}", path, err);
                 }
-                overlay.add_toast(Toast::new(&format!(
+                overlay.add_toast(error_toast(&format!(
                     "Restored 1 item; {} placeholder(s) couldn't be cleaned up (see stderr).",
                     failures.len()
                 )));
             }
-            Err(e) => overlay.add_toast(Toast::new(&format!("Restore failed: {}", e))),
+            Err(e) => overlay.add_toast(error_toast(&format!("Restore failed: {}", e))),
         },
     );
 }

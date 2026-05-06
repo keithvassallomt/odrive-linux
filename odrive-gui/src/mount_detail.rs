@@ -35,9 +35,10 @@ use adw::gtk as gtk;
 use adw::{
     ActionRow, ComboRow, HeaderBar, MessageDialog, NavigationPage, NavigationView,
     PreferencesGroup, PreferencesPage, ResponseAppearance, StatusPage, SwitchRow,
-    Toast, ToastOverlay, ToolbarView,
+    ToastOverlay, ToolbarView,
 };
 use gtk::{glib, Align, Box as GtkBox, Button, Entry, Image, Label, Orientation, Spinner, StringList};
+use crate::toasts::{error_toast, toast};
 use odrive_core::{FolderRule, FolderSyncThreshold, OdriveAgent, OdriveDb, OdriveError};
 use std::cell::Cell;
 use std::fs;
@@ -261,12 +262,12 @@ fn expansion_widget(state: &Rc<PageState>) -> StatusPage {
                 Ok(_) => {
                     state_for_done
                         .overlay
-                        .add_toast(Toast::new("Folder expanded"));
+                        .add_toast(toast("Folder expanded"));
                     render_into_toolbar(&state_for_done);
                 }
                 Err(e) => state_for_done
                     .overlay
-                    .add_toast(Toast::new(&format!("Expansion failed: {}", e))),
+                    .add_toast(error_toast(&format!("Expansion failed: {}", e))),
             }
         },
     );
@@ -769,10 +770,10 @@ fn build_rule_group(state: &Rc<PageState>) -> PreferencesGroup {
                     btn_for_done.set_sensitive(true);
                     btn_for_done.set_label("Sync");
                     match result {
-                        Ok(_) => state_for_done.overlay.add_toast(Toast::new("Sync complete")),
+                        Ok(_) => state_for_done.overlay.add_toast(toast("Sync complete")),
                         Err(e) => state_for_done
                             .overlay
-                            .add_toast(Toast::new(&format!("Sync failed: {}", e))),
+                            .add_toast(error_toast(&format!("Sync failed: {}", e))),
                     }
                 },
             );
@@ -794,7 +795,7 @@ fn build_rule_group(state: &Rc<PageState>) -> PreferencesGroup {
                 match raw.trim().parse::<u32>() {
                     Ok(n) if n > 0 => Some(n),
                     _ => {
-                        state.overlay.add_toast(Toast::new(
+                        state.overlay.add_toast(error_toast(
                             "Enter a positive integer (in MB) for the custom threshold.",
                         ));
                         return;
@@ -825,7 +826,7 @@ fn build_rule_group(state: &Rc<PageState>) -> PreferencesGroup {
                             threshold.to_db_value(),
                             expand,
                         ) {
-                            state.overlay.add_toast(Toast::new(&format!(
+                            state.overlay.add_toast(error_toast(&format!(
                                 "Saved upstream but DB write failed: {}",
                                 e
                             )));
@@ -849,7 +850,7 @@ fn build_rule_group(state: &Rc<PageState>) -> PreferencesGroup {
                     if threshold == FolderSyncThreshold::None {
                         btn.set_sensitive(true);
                         btn.set_label("Save");
-                        state.overlay.add_toast(Toast::new("Folder rule saved"));
+                        state.overlay.add_toast(toast("Folder rule saved"));
                         render_into_toolbar(&state);
                     } else {
                         // Rule itself is set instantly upstream; the
@@ -868,14 +869,14 @@ fn build_rule_group(state: &Rc<PageState>) -> PreferencesGroup {
                             state.folder_path.clone(),
                             move || agent_for_worker.sync_recursive(&path, false),
                             move |result: Result<String, OdriveError>| {
-                                let toast = match result {
-                                    Ok(_) => "Rule saved and applied to existing files".to_string(),
-                                    Err(e) => format!(
+                                let t = match result {
+                                    Ok(_) => toast("Rule saved and applied to existing files"),
+                                    Err(e) => error_toast(&format!(
                                         "Rule saved; sync of existing files failed: {}",
                                         e
-                                    ),
+                                    )),
                                 };
-                                state_for_done.overlay.add_toast(Toast::new(&toast));
+                                state_for_done.overlay.add_toast(t);
                                 render_into_toolbar(&state_for_done);
                             },
                         );
@@ -886,7 +887,7 @@ fn build_rule_group(state: &Rc<PageState>) -> PreferencesGroup {
                     btn.set_label("Save");
                     state
                         .overlay
-                        .add_toast(Toast::new(&format!("Save failed: {}", e)));
+                        .add_toast(error_toast(&format!("Save failed: {}", e)));
                 }
             }
         });
@@ -953,7 +954,7 @@ fn confirm_delete_rule(button: &Button, state: Rc<PageState>) {
                     // (Nautilus picks that up via inotify on its own).
                     touch_mtime(&state.folder_path);
                     if also_unsync {
-                        state.overlay.add_toast(Toast::new(
+                        state.overlay.add_toast(toast(
                             "Rule removed — unsyncing local files…",
                         ));
                         let agent_for_worker = state.agent.as_ref().clone();
@@ -965,8 +966,8 @@ fn confirm_delete_rule(button: &Button, state: Rc<PageState>) {
                                 match result {
                                     Ok(_) => state_for_done
                                         .overlay
-                                        .add_toast(Toast::new("Local files unsynced")),
-                                    Err(e) => state_for_done.overlay.add_toast(Toast::new(
+                                        .add_toast(toast("Local files unsynced")),
+                                    Err(e) => state_for_done.overlay.add_toast(error_toast(
                                         &format!("Rule removed; unsync failed: {}", e),
                                     )),
                                 }
@@ -974,13 +975,13 @@ fn confirm_delete_rule(button: &Button, state: Rc<PageState>) {
                             },
                         );
                     } else {
-                        state.overlay.add_toast(Toast::new("Folder rule removed"));
+                        state.overlay.add_toast(toast("Folder rule removed"));
                         render_into_toolbar(&state);
                     }
                 }
                 Err(e) => state
                     .overlay
-                    .add_toast(Toast::new(&format!("Delete failed: {}", e))),
+                    .add_toast(error_toast(&format!("Delete failed: {}", e))),
             }
         }
         dlg.close();

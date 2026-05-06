@@ -4,6 +4,7 @@ mod indicator;
 mod log_viewer;
 mod mount_detail;
 mod settings_page;
+mod toasts;
 mod trash_page;
 mod wizard;
 mod worker;
@@ -14,10 +15,11 @@ use adw::gtk as gtk;
 use adw::{
     ActionRow, ApplicationWindow, EntryRow, HeaderBar, MessageDialog, NavigationPage,
     NavigationView, PreferencesGroup, PreferencesPage, ResponseAppearance,
-    StatusPage, Toast, ToastOverlay, ToolbarView, Window,
+    StatusPage, ToastOverlay, ToolbarView, Window,
 };
 use gtk::{gdk, gio, Application, Button, CssProvider, MenuButton};
 use odrive_core::{FolderRule, FolderSyncThreshold, OdriveAgent, OdriveDb};
+use crate::toasts::{error_toast, toast};
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
@@ -566,7 +568,7 @@ fn push_folder_page(
     path: &str,
 ) {
     if !Path::new(path).exists() {
-        overlay.add_toast(Toast::new(&format!(
+        overlay.add_toast(error_toast(&format!(
             "Folder no longer exists: {}",
             path
         )));
@@ -594,7 +596,7 @@ pub(crate) fn toggle_pause(agent: &Rc<OdriveAgent>, overlay: &ToastOverlay, path
     let db = match OdriveDb::open(agent.get_db_path()) {
         Ok(d) => d,
         Err(e) => {
-            overlay.add_toast(Toast::new(&format!("DB error: {}", e)));
+            overlay.add_toast(error_toast(&format!("DB error: {}", e)));
             return;
         }
     };
@@ -618,7 +620,7 @@ pub(crate) fn toggle_pause(agent: &Rc<OdriveAgent>, overlay: &ToastOverlay, path
         }
     };
     if let Err(e) = result {
-        overlay.add_toast(Toast::new(&format!("Agent push failed: {}", e)));
+        overlay.add_toast(error_toast(&format!("Agent push failed: {}", e)));
     }
 }
 
@@ -627,12 +629,12 @@ pub(crate) fn toggle_pause(agent: &Rc<OdriveAgent>, overlay: &ToastOverlay, path
 /// retry from the same row.
 fn delete_rule(agent: &Rc<OdriveAgent>, overlay: &ToastOverlay, path: &str) {
     if let Err(e) = agent.folder_sync_rule(path, FolderSyncThreshold::None, false) {
-        overlay.add_toast(Toast::new(&format!("Delete failed (agent): {}", e)));
+        overlay.add_toast(error_toast(&format!("Delete failed (agent): {}", e)));
         return;
     }
     if let Ok(db) = OdriveDb::open(agent.get_db_path()) {
         if let Err(e) = db.delete_folder_rule(path) {
-            overlay.add_toast(Toast::new(&format!("Delete failed (db): {}", e)));
+            overlay.add_toast(error_toast(&format!("Delete failed (db): {}", e)));
         }
     }
 }
@@ -748,8 +750,8 @@ fn confirm_and_unmount(
     dialog.connect_response(None, move |dlg, response| {
         if response == "unmount" {
             match agent.unmount(&local_path_for_cb) {
-                Ok(_) => overlay.add_toast(Toast::new("Mount removed")),
-                Err(e) => overlay.add_toast(Toast::new(&format!("Unmount failed: {}", e))),
+                Ok(_) => overlay.add_toast(toast("Mount removed")),
+                Err(e) => overlay.add_toast(error_toast(&format!("Unmount failed: {}", e))),
             }
         }
         dlg.close();
@@ -910,13 +912,13 @@ fn present_add_mount_dialog(
             if let (Some(local), false) = (local, trimmed.is_empty()) {
                 match agent_for_save.mount(&local, &trimmed) {
                     Ok(_) => {
-                        overlay_for_save.add_toast(Toast::new("Mount added"));
+                        overlay_for_save.add_toast(toast("Mount added"));
                         win_for_save.close();
                     }
                     Err(e) => {
                         // Don't close — let the user fix and retry.
                         overlay_for_save
-                            .add_toast(Toast::new(&format!("Couldn't add mount: {}", e)));
+                            .add_toast(error_toast(&format!("Couldn't add mount: {}", e)));
                     }
                 }
             }

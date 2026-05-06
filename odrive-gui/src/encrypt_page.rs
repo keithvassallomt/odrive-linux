@@ -42,11 +42,12 @@
 use crate::worker;
 use adw::prelude::*;
 use adw::{
-    ActionRow, EntryRow, PasswordEntryRow, PreferencesGroup, PreferencesPage, SwitchRow, Toast,
+    ActionRow, EntryRow, PasswordEntryRow, PreferencesGroup, PreferencesPage, SwitchRow,
     ToastOverlay,
 };
 use libadwaita as adw;
 use odrive_core::OdriveAgent;
+use crate::toasts::{error_toast, toast};
 use std::rc::Rc;
 
 const MANAGE_URL: &str = "https://www.odrive.com/account/myodrive";
@@ -132,11 +133,11 @@ pub fn build_encrypt_page(agent: Rc<OdriveAgent>, overlay: ToastOverlay) -> Pref
             let initialize = init_row.is_active();
             let id = id_text.trim().to_string();
             if id.is_empty() {
-                overlay.add_toast(Toast::new("Encryption ID is required."));
+                overlay.add_toast(error_toast("Encryption ID is required."));
                 return;
             }
             if pass_text.is_empty() {
-                overlay.add_toast(Toast::new("Passphrase is required."));
+                overlay.add_toast(error_toast("Passphrase is required."));
                 return;
             }
             save_btn_for_cb.set_sensitive(false);
@@ -152,16 +153,16 @@ pub fn build_encrypt_page(agent: Rc<OdriveAgent>, overlay: ToastOverlay) -> Pref
                 },
                 move |result| {
                     save_reset.set_sensitive(true);
-                    let toast = match result {
+                    let t = match result {
                         Ok(()) => {
                             // Wipe the passphrase from the input so it
                             // isn't sitting on screen after success.
                             pass_row_w.set_text("");
-                            Toast::new("Passphrase saved.")
+                            toast("Passphrase saved.")
                         }
-                        Err(e) => Toast::new(&format!("Couldn't save passphrase: {}", e)),
+                        Err(e) => error_toast(&format!("Couldn't save passphrase: {}", e)),
                     };
-                    overlay_w.add_toast(toast);
+                    overlay_w.add_toast(t);
                 },
             );
         });

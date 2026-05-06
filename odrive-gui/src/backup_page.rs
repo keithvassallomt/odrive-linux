@@ -38,10 +38,11 @@ use adw::gtk::glib;
 use adw::prelude::*;
 use adw::{
     ActionRow, EntryRow, HeaderBar, MessageDialog, PreferencesGroup, PreferencesPage,
-    ResponseAppearance, Toast, ToastOverlay, ToolbarView, Window,
+    ResponseAppearance, ToastOverlay, ToolbarView, Window,
 };
 use libadwaita as adw;
 use odrive_core::{BackupJob, BackupSchedule, OdriveAgent};
+use crate::toasts::{error_toast, toast};
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
@@ -104,11 +105,11 @@ pub fn build_backup_page(agent: Rc<OdriveAgent>, overlay: ToastOverlay) -> Prefe
                 move || agent_inner.backup_now().map(|_| ()),
                 move |result| {
                     backup_now_reset.set_sensitive(true);
-                    let toast = match result {
-                        Ok(()) => Toast::new("Backup queued — running now."),
-                        Err(e) => Toast::new(&format!("Couldn't trigger backup: {}", e)),
+                    let t = match result {
+                        Ok(()) => toast("Backup queued — running now."),
+                        Err(e) => error_toast(&format!("Couldn't trigger backup: {}", e)),
                     };
-                    overlay_w.add_toast(toast);
+                    overlay_w.add_toast(t);
                 },
             );
         });
@@ -304,11 +305,11 @@ fn confirm_and_remove(
             worker::spawn(
                 move || agent_inner.remove_backup_job(&job_id).map(|_| ()),
                 move |result| {
-                    let toast = match result {
-                        Ok(()) => Toast::new("Backup removed."),
-                        Err(e) => Toast::new(&format!("Couldn't remove backup: {}", e)),
+                    let t = match result {
+                        Ok(()) => toast("Backup removed."),
+                        Err(e) => error_toast(&format!("Couldn't remove backup: {}", e)),
                     };
-                    overlay_w.add_toast(toast);
+                    overlay_w.add_toast(t);
                 },
             );
         }
@@ -489,11 +490,11 @@ fn present_add_backup_dialog(
                 worker::spawn(
                     move || agent_inner.add_backup_job(&local, &trimmed).map(|_| ()),
                     move |result| {
-                        let toast = match result {
-                            Ok(()) => Toast::new("Backup added."),
-                            Err(e) => Toast::new(&format!("Couldn't add backup: {}", e)),
+                        let t = match result {
+                            Ok(()) => toast("Backup added."),
+                            Err(e) => error_toast(&format!("Couldn't add backup: {}", e)),
                         };
-                        overlay_w.add_toast(toast);
+                        overlay_w.add_toast(t);
                         win_close.close();
                     },
                 );

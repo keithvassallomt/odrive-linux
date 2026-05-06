@@ -20,11 +20,39 @@ use adw::prelude::*;
 use adw::gtk as gtk;
 use adw::{
     ApplicationWindow, EntryRow, HeaderBar, NavigationPage, NavigationView,
-    StatusPage, Toast, ToastOverlay,
+    PreferencesGroup, StatusPage, ToastOverlay, ToolbarView,
 };
 use gtk::{
     gio, glib, Align, Application, Box as GtkBox, Button, FileDialog, Orientation,
 };
+use crate::toasts::{error_toast, toast};
+
+/// Mascot icon name resolved against hicolor; the same illustration the
+/// About dialog uses. Single visual identity across every wizard page.
+const WIZARD_ICON: &str = "odrive-linux-mascot";
+
+/// Pixel width every wizard action button gets via `set_size_request`.
+/// 280 reads as comfortable for the longest label ("Start at login (and
+/// survive reboot)") without dwarfing single-word buttons; homogeneous
+/// rendering inside a vertical Box plus this floor produces visually
+/// uniform widths.
+const WIZARD_BTN_WIDTH: i32 = 280;
+
+/// Build a wizard action button: pill style, uniform width, optionally
+/// the suggested-action variant for the recommended choice. Centralises
+/// the styling so a future tweak lands in one place rather than 7+.
+fn action_button(label: &str, suggested: bool) -> Button {
+    let btn = Button::builder()
+        .label(label)
+        .halign(Align::Center)
+        .build();
+    btn.set_size_request(WIZARD_BTN_WIDTH, -1);
+    btn.add_css_class("pill");
+    if suggested {
+        btn.add_css_class("suggested-action");
+    }
+    btn
+}
 use crate::worker;
 use odrive_core::{OdriveAgent, OdriveConfig, OdriveError};
 use std::cell::RefCell;
@@ -46,16 +74,24 @@ where
     let overlay = ToastOverlay::new();
     overlay.set_child(Some(&nav));
 
-    let outer = GtkBox::new(Orientation::Vertical, 0);
-    outer.append(&HeaderBar::new());
-    outer.append(&overlay);
+    // ToolbarView is the modern shell — gives the HeaderBar proper
+    // background-blending behaviour and (crucially) docks the
+    // ToastOverlay's bottom edge at the window content's bottom edge,
+    // so toasts always appear at the window bottom regardless of which
+    // page is currently visible. The earlier manual Box + HeaderBar
+    // pattern positioned toasts at the bottom of the NavigationView's
+    // content, which on a tall window with centered StatusPage content
+    // ended up hugging the StatusPage rather than the window frame.
+    let toolbar = ToolbarView::new();
+    toolbar.add_top_bar(&HeaderBar::new());
+    toolbar.set_content(Some(&overlay));
 
     let window = ApplicationWindow::builder()
         .application(app)
         .title("odrive Manager — Setup")
         .default_width(640)
         .default_height(480)
-        .content(&outer)
+        .content(&toolbar)
         .build();
 
     // Closing the window — for any reason — completes the wizard. The
@@ -130,36 +166,23 @@ fn install_page(
     overlay: &ToastOverlay,
     window: &ApplicationWindow,
 ) -> NavigationPage {
-    let body = GtkBox::new(Orientation::Vertical, 12);
-    body.set_margin_top(24);
-    body.set_margin_bottom(24);
-    body.set_margin_start(24);
-    body.set_margin_end(24);
+    let pick_btn = action_button("Specify custom location", false);
+    let install_btn = action_button("Install for me", true);
+
+    let actions = GtkBox::new(Orientation::Vertical, 12);
+    actions.set_halign(Align::Center);
+    actions.append(&pick_btn);
+    actions.append(&install_btn);
 
     let status = StatusPage::builder()
-        .icon_name("application-x-executable-symbolic")
+        .icon_name(WIZARD_ICON)
         .title("Install odrive")
         .description(format!(
             "Couldn't find odrive at {}. Either point us at an existing install, or let us run the official installer.",
             agent.borrow().agent_bin_dir(),
         ))
+        .child(&actions)
         .build();
-    body.append(&status);
-
-    let pick_btn = Button::builder()
-        .label("Specify custom location")
-        .halign(Align::Center)
-        .build();
-    pick_btn.add_css_class("pill");
-    body.append(&pick_btn);
-
-    let install_btn = Button::builder()
-        .label("Install for me")
-        .halign(Align::Center)
-        .build();
-    install_btn.add_css_class("pill");
-    install_btn.add_css_class("suggested-action");
-    body.append(&install_btn);
 
     {
         let nav = nav.clone();
@@ -194,12 +217,12 @@ fn install_page(
                     btn_for_done.set_label("Install for me");
                     match result {
                         Ok(_) => {
-                            overlay_for_done.add_toast(Toast::new("odrive installed"));
+                            overlay_for_done.add_toast(toast("odrive installed"));
                             push_next(&nav_for_done, &agent_for_done, &overlay_for_done, &window_for_done);
                         }
                         Err(e) => {
                             overlay_for_done
-                                .add_toast(Toast::new(&format!("Install failed: {}", e)));
+                                .add_toast(error_toast(&format!("Install failed: {}", e)));
                         }
                     }
                 },
@@ -209,7 +232,7 @@ fn install_page(
 
     NavigationPage::builder()
         .title("Install")
-        .child(&body)
+        .child(&status)
         .can_pop(false)
         .build()
 }
@@ -240,7 +263,7 @@ fn pick_custom_location(
             Err(_) => return, // user cancelled
         };
         let Some(path) = folder.path() else {
-            overlay.add_toast(Toast::new("Selected folder has no usable path"));
+            overlay.add_toast(error_toast("Selected folder has no usable path"));
             return;
         };
         let bin_dir = path.to_string_lossy().to_string();
@@ -248,7 +271,7 @@ fn pick_custom_location(
         let odrive_bin = format!("{}/odrive", bin_dir);
         let agent_bin = format!("{}/odriveagent", bin_dir);
         if !Path::new(&odrive_bin).exists() || !Path::new(&agent_bin).exists() {
-            overlay.add_toast(Toast::new(
+            overlay.add_toast(error_toast(
                 "That folder doesn't contain odrive and odriveagent — pick the bin/ directory.",
             ));
             return;
@@ -259,11 +282,11 @@ fn pick_custom_location(
         let mut cfg = OdriveConfig::load();
         cfg.agent_bin_dir = bin_dir;
         if let Err(e) = cfg.save() {
-            overlay.add_toast(Toast::new(&format!("Could not save config: {}", e)));
+            overlay.add_toast(error_toast(&format!("Could not save config: {}", e)));
             return;
         }
         *agent.borrow_mut() = trial;
-        overlay.add_toast(Toast::new("Custom location saved"));
+        overlay.add_toast(toast("Custom location saved"));
         push_next(&nav, &agent, &overlay, &window_for_cb);
     });
 }
@@ -278,33 +301,20 @@ fn service_page(
     overlay: &ToastOverlay,
     window: &ApplicationWindow,
 ) -> NavigationPage {
-    let body = GtkBox::new(Orientation::Vertical, 12);
-    body.set_margin_top(24);
-    body.set_margin_bottom(24);
-    body.set_margin_start(24);
-    body.set_margin_end(24);
+    let once_btn = action_button("Start once", false);
+    let auto_btn = action_button("Start at login (and survive reboot)", true);
+
+    let actions = GtkBox::new(Orientation::Vertical, 12);
+    actions.set_halign(Align::Center);
+    actions.append(&once_btn);
+    actions.append(&auto_btn);
 
     let status = StatusPage::builder()
-        .icon_name("system-run-symbolic")
+        .icon_name(WIZARD_ICON)
         .title("Start the agent")
         .description("odriveagent isn't running. How do you want to start it?")
+        .child(&actions)
         .build();
-    body.append(&status);
-
-    let once_btn = Button::builder()
-        .label("Start once")
-        .halign(Align::Center)
-        .build();
-    once_btn.add_css_class("pill");
-    body.append(&once_btn);
-
-    let auto_btn = Button::builder()
-        .label("Start at login (and survive reboot)")
-        .halign(Align::Center)
-        .build();
-    auto_btn.add_css_class("pill");
-    auto_btn.add_css_class("suggested-action");
-    body.append(&auto_btn);
 
     {
         let nav = nav.clone();
@@ -330,7 +340,7 @@ fn service_page(
                     btn_for_done.set_label("Start once");
                     match result {
                         Ok(_) => {
-                            overlay_for_done.add_toast(Toast::new("Agent started"));
+                            overlay_for_done.add_toast(toast("Agent started"));
                             advance_when_ready(
                                 &nav_for_done,
                                 &agent_for_done,
@@ -339,7 +349,7 @@ fn service_page(
                             );
                         }
                         Err(e) => overlay_for_done
-                            .add_toast(Toast::new(&format!("Start failed: {}", e))),
+                            .add_toast(error_toast(&format!("Start failed: {}", e))),
                     }
                 },
             );
@@ -375,7 +385,7 @@ fn service_page(
                     btn_for_done.set_label("Start at login (and survive reboot)");
                     match result {
                         Ok(_) => {
-                            overlay_for_done.add_toast(Toast::new("Auto-start enabled"));
+                            overlay_for_done.add_toast(toast("Auto-start enabled"));
                             advance_when_ready(
                                 &nav_for_done,
                                 &agent_for_done,
@@ -384,7 +394,7 @@ fn service_page(
                             );
                         }
                         Err(e) => overlay_for_done
-                            .add_toast(Toast::new(&format!("Auto-start failed: {}", e))),
+                            .add_toast(error_toast(&format!("Auto-start failed: {}", e))),
                     }
                 },
             );
@@ -393,7 +403,7 @@ fn service_page(
 
     NavigationPage::builder()
         .title("Service")
-        .child(&body)
+        .child(&status)
         .can_pop(false)
         .build()
 }
@@ -441,7 +451,7 @@ fn advance_when_ready(
         let n = attempts.get() + 1;
         attempts.set(n);
         if n >= 20 {
-            overlay.add_toast(Toast::new(
+            overlay.add_toast(error_toast(
                 "Agent didn't come online in time. Check `systemctl --user status odrive.service`.",
             ));
             return glib::ControlFlow::Break;
@@ -460,38 +470,35 @@ fn login_page(
     overlay: &ToastOverlay,
     window: &ApplicationWindow,
 ) -> NavigationPage {
-    let body = GtkBox::new(Orientation::Vertical, 12);
-    body.set_margin_top(24);
-    body.set_margin_bottom(24);
-    body.set_margin_start(24);
-    body.set_margin_end(24);
+    let get_code_btn = action_button("Get auth code", false);
+    let submit_btn = action_button("Sign in", true);
+
+    // PreferencesGroup gives the EntryRow the rounded-card border +
+    // shadow GNOME settings rows have, so the field reads as a defined
+    // input control instead of melting into the page background. Also
+    // forces a sensible width — the bare EntryRow stretched across the
+    // full content width and looked unbalanced next to the centered
+    // buttons above and below it.
+    let entry_row = EntryRow::builder().title("Auth code").build();
+    let entry_group = PreferencesGroup::new();
+    entry_group.add(&entry_row);
+    entry_group.set_halign(Align::Center);
+    entry_group.set_size_request(WIZARD_BTN_WIDTH, -1);
+
+    let actions = GtkBox::new(Orientation::Vertical, 12);
+    actions.set_halign(Align::Center);
+    actions.append(&get_code_btn);
+    actions.append(&entry_group);
+    actions.append(&submit_btn);
 
     let status = StatusPage::builder()
-        .icon_name("dialog-password-symbolic")
+        .icon_name(WIZARD_ICON)
         .title("Sign in to odrive")
         .description(
             "Get an authentication code from your odrive account, then paste it below.",
         )
+        .child(&actions)
         .build();
-    body.append(&status);
-
-    let get_code_btn = Button::builder()
-        .label("Get auth code")
-        .halign(Align::Center)
-        .build();
-    get_code_btn.add_css_class("pill");
-    body.append(&get_code_btn);
-
-    let entry_row = EntryRow::builder().title("Auth code").build();
-    body.append(&entry_row);
-
-    let submit_btn = Button::builder()
-        .label("Sign in")
-        .halign(Align::Center)
-        .build();
-    submit_btn.add_css_class("pill");
-    submit_btn.add_css_class("suggested-action");
-    body.append(&submit_btn);
 
     {
         let overlay = overlay.clone();
@@ -503,7 +510,7 @@ fn login_page(
                 .arg("https://www.odrive.com/account/authcodes")
                 .spawn();
             if let Err(e) = r {
-                overlay.add_toast(Toast::new(&format!("Couldn't open browser: {}", e)));
+                overlay.add_toast(error_toast(&format!("Couldn't open browser: {}", e)));
             }
         });
     }
@@ -517,7 +524,7 @@ fn login_page(
         submit_btn.connect_clicked(move |btn| {
             let code = entry_row.text().trim().to_string();
             if code.is_empty() {
-                overlay.add_toast(Toast::new("Paste your auth code first"));
+                overlay.add_toast(error_toast("Paste your auth code first"));
                 return;
             }
             btn.set_sensitive(false);
@@ -525,17 +532,17 @@ fn login_page(
             btn.set_sensitive(true);
             match result {
                 Ok(_) => {
-                    overlay.add_toast(Toast::new("Signed in"));
+                    overlay.add_toast(toast("Signed in"));
                     push_next(&nav, &agent, &overlay, &window);
                 }
-                Err(e) => overlay.add_toast(Toast::new(&format!("Sign-in failed: {}", e))),
+                Err(e) => overlay.add_toast(error_toast(&format!("Sign-in failed: {}", e))),
             }
         });
     }
 
     NavigationPage::builder()
         .title("Sign in")
-        .child(&body)
+        .child(&status)
         .can_pop(false)
         .build()
 }
@@ -550,44 +557,27 @@ fn mount_page(
     overlay: &ToastOverlay,
     window: &ApplicationWindow,
 ) -> NavigationPage {
-    let body = GtkBox::new(Orientation::Vertical, 12);
-    body.set_margin_top(24);
-    body.set_margin_bottom(24);
-    body.set_margin_start(24);
-    body.set_margin_end(24);
-
     let default_path = agent.borrow().default_mount_path();
+
+    let default_btn = action_button(&format!("Use default ({})", default_path), true);
+    let pick_btn = action_button("Choose a different folder", false);
+    let skip_btn = action_button("Skip — I'll mount later", false);
+
+    let actions = GtkBox::new(Orientation::Vertical, 12);
+    actions.set_halign(Align::Center);
+    actions.append(&default_btn);
+    actions.append(&pick_btn);
+    actions.append(&skip_btn);
+
     let status = StatusPage::builder()
-        .icon_name("folder-symbolic")
+        .icon_name(WIZARD_ICON)
         .title("Mount your odrive root (optional)")
         .description(format!(
             "Pick a local folder to mirror your odrive cloud into. Default is {}.",
             default_path,
         ))
+        .child(&actions)
         .build();
-    body.append(&status);
-
-    let default_btn = Button::builder()
-        .label(format!("Use default ({})", default_path))
-        .halign(Align::Center)
-        .build();
-    default_btn.add_css_class("pill");
-    default_btn.add_css_class("suggested-action");
-    body.append(&default_btn);
-
-    let pick_btn = Button::builder()
-        .label("Choose a different folder")
-        .halign(Align::Center)
-        .build();
-    pick_btn.add_css_class("pill");
-    body.append(&pick_btn);
-
-    let skip_btn = Button::builder()
-        .label("Skip — I'll mount later")
-        .halign(Align::Center)
-        .build();
-    skip_btn.add_css_class("pill");
-    body.append(&skip_btn);
 
     {
         let nav = nav.clone();
@@ -603,15 +593,15 @@ fn mount_page(
             // belt-and-braces guard for users who customised
             // `default_mount_path` to something deeper.
             if let Err(e) = std::fs::create_dir_all(&default_path) {
-                overlay.add_toast(Toast::new(&format!("Could not create {}: {}", default_path, e)));
+                overlay.add_toast(error_toast(&format!("Could not create {}: {}", default_path, e)));
                 return;
             }
             match agent.borrow().mount(&default_path, "/") {
                 Ok(_) => {
-                    overlay.add_toast(Toast::new("Mount created"));
+                    overlay.add_toast(toast("Mount created"));
                     push_next(&nav, &agent, &overlay, &window);
                 }
-                Err(e) => overlay.add_toast(Toast::new(&format!("Mount failed: {}", e))),
+                Err(e) => overlay.add_toast(error_toast(&format!("Mount failed: {}", e))),
             }
         });
     }
@@ -638,7 +628,7 @@ fn mount_page(
 
     NavigationPage::builder()
         .title("Mount")
-        .child(&body)
+        .child(&status)
         .can_pop(false)
         .build()
 }
@@ -670,16 +660,16 @@ fn run_mount_picker(
             Err(_) => return,
         };
         let Some(path) = folder.path() else {
-            overlay.add_toast(Toast::new("Selected folder has no usable path"));
+            overlay.add_toast(error_toast("Selected folder has no usable path"));
             return;
         };
         let local = path.to_string_lossy().to_string();
         match agent.borrow().mount(&local, "/") {
             Ok(_) => {
-                overlay.add_toast(Toast::new("Mount created"));
+                overlay.add_toast(toast("Mount created"));
                 push_next(&nav, &agent, &overlay, &window_for_cb);
             }
-            Err(e) => overlay.add_toast(Toast::new(&format!("Mount failed: {}", e))),
+            Err(e) => overlay.add_toast(error_toast(&format!("Mount failed: {}", e))),
         }
     });
 }
