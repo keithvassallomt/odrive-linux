@@ -144,6 +144,47 @@ pick_one() {
     done < <(compgen -G "${dir}/${pat}" || true)
 }
 
+# ---------- sweep dev-checkout shadows ----------
+# Anyone who previously ran `cargo run -p odrive-cli -- install-handlers`
+# from a workspace checkout has copies of our .desktop / icons / MIME XML
+# under ~/.local/share/. XDG resolution prefers user-local over /usr/share,
+# so those stale copies (with Exec= pointing at a target/debug binary that
+# may no longer exist) shadow what the .deb / .rpm just installed and the
+# launcher silently disappears from the GNOME app grid. Sweep them.
+sweep_user_shadows() {
+    local user_data="${XDG_DATA_HOME:-$HOME/.local/share}"
+    local removed=0
+
+    for f in \
+        "$user_data/applications/io.github.keithvassallomt.odrive-linux.desktop" \
+        "$user_data/applications/odrive-linux-open.desktop" \
+        "$user_data/mime/packages/odrive-linux.xml"; do
+        if [ -e "$f" ]; then
+            run "rm -f '$f'"
+            removed=$((removed + 1))
+        fi
+    done
+
+    # Sweep our installed icon names from every size bucket.
+    if [ -d "$user_data/icons/hicolor" ]; then
+        local hicolor="$user_data/icons/hicolor"
+        local icon_count
+        icon_count=$(find "$hicolor" -name 'odrive-*.png' -o -name 'io.github.keithvassallomt.odrive-linux.png' 2>/dev/null | wc -l)
+        if [ "${icon_count:-0}" -gt 0 ]; then
+            run "find '$hicolor' \\( -name 'odrive-*.png' -o -name 'io.github.keithvassallomt.odrive-linux.png' \\) -delete"
+            run "gtk-update-icon-cache -f -t '$hicolor' >/dev/null 2>&1 || true"
+            removed=$((removed + icon_count))
+        fi
+    fi
+
+    if [ "$removed" -gt 0 ]; then
+        log "swept ${removed} stale file(s) from ${user_data} (left over from a prior dev install-handlers run)"
+        run "update-desktop-database '$user_data/applications' >/dev/null 2>&1 || true"
+        run "update-mime-database '$user_data/mime' >/dev/null 2>&1 || true"
+    fi
+}
+sweep_user_shadows
+
 tmpdir="$(mktemp -d)"
 chmod 0755 "$tmpdir"  # apt's _apt user needs to be able to read inside.
 trap 'rm -rf "$tmpdir"' EXIT
